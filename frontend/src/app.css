@@ -1,0 +1,32 @@
+:root {
+  --bg: #101317;
+  --surface: #171b21;
+  --surface-2: #1e232b;
+  --border: #262c35;
+  --text: #e6e9ee;
+  --text-dim: #8b93a1;
+  --accent: #2f7cf6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+#app {
+  height: 100%;
+}
+
+button {
+  font-family: inherit;
+}

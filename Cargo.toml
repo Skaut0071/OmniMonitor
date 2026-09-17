@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/omni-core",
+    "crates/omni-db",
+    "crates/omni-capture",
+    "crates/omni-webrtc",
+    "crates/omni-server",
+    "crates/omni-wasm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Skaut0071/OmniMonitor"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["fs", "trace", "cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1"
+
+gstreamer = "0.23"
+gstreamer-app = "0.23"
+gstreamer-video = "0.23"
+
+webrtc = "0.11"
+
+sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
+
+v4l = "0.14"
+
+omni-core = { path = "crates/omni-core" }
+omni-db = { path = "crates/omni-db" }
+omni-capture = { path = "crates/omni-capture" }
+omni-webrtc = { path = "crates/omni-webrtc" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
