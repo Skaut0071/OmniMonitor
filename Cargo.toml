@@ -33,6 +33,7 @@ bytes = "1"
 gstreamer = "0.23"
 gstreamer-app = "0.23"
 gstreamer-video = "0.23"
+gstreamer-rtsp-server = "0.23"
 
 webrtc = "0.11"
 

@@ -3,6 +3,7 @@ mod discovery;
 mod motion;
 mod retention;
 mod routes;
+mod rtsp;
 mod state;
 mod supervisor;
 mod ws;
@@ -20,6 +21,7 @@ use omni_core::AppConfig;
 use omni_db::Db;
 
 use discovery::auto_discover_usb_cameras;
+use rtsp::RtspServer;
 use state::AppState;
 use supervisor::Supervisor;
 
@@ -59,11 +61,23 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(retention::run(db.clone(), PathBuf::from(&config.data_dir)));
     tokio::spawn(auth::run_session_sweeper(db.clone()));
 
+    let rtsp_server = RtspServer::start(config.rtsp_port);
+
     let state = Arc::new(AppState {
         db,
         config: config.clone(),
         supervisor,
+        rtsp_server,
     });
+
+    // Every camera gets an RTSP mount point at /<camera-id>, regardless
+    // of recording/motion settings - unlike the capture pipeline itself,
+    // registering a mount point is cheap (it only starts a pipeline once
+    // an RTSP client actually connects, via `Supervisor::acquire_viewer`
+    // same as any other viewer).
+    for camera in state.db.list_cameras().await.unwrap_or_default() {
+        state.rtsp_server.add_camera(Arc::clone(&state), camera);
+    }
 
     let frontend_dist = PathBuf::from(
         std::env::var("OMNI_FRONTEND_DIST").unwrap_or_else(|_| "frontend/dist".to_string()),

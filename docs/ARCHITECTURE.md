@@ -10,12 +10,12 @@ pitch is two things combined:
    as full peers of network/RTSP cameras - the same live-preview and
    recording pipeline handles both.
 
-v0.4 targets Linux only, HTTP only (no TLS - see "HTTPS" below), single-box
-deployments. Default ports: **8090** for the web UI/API, **5544** for RTSP
-*server* (reserved for a future milestone - re-serving OmniMonitor's own
-streams over RTSP - not implemented yet; consuming a camera's RTSP stream
-as a *client*, which is most of what "RTSP support" means day to day, is
-implemented).
+v0.5 targets Linux only, HTTP only (no TLS - see "HTTPS" below), single-box
+deployments. Default ports: **8090** for the web UI/API, **5544** for the
+RTSP *server* - every camera, including USB ones, is also reachable at
+`rtsp://<host>:5544/<camera-id>` for third-party NVR/VMS/player software
+(see "RTSP server" below). Consuming a camera's RTSP stream as a *client*
+(most of what "RTSP support" means day to day) has existed since v0.2.
 
 ## Why these technology choices
 
@@ -68,6 +68,8 @@ crates/
                   artifact - see scripts/build-wasm.sh).
   omni-server   - axum HTTP/WebSocket server (the binary):
                   - routes.rs / ws.rs: REST API + WebRTC signaling.
+                  - auth.rs: single-admin-account login, argon2 password
+                    hashing, session-cookie middleware.
                   - supervisor.rs: owns the one running capture pipeline
                     per camera, shared across every live viewer and
                     recording, and rebuilds it on motion transitions for
@@ -77,6 +79,9 @@ crates/
                     call.
                   - retention.rs: background reaper enforcing each
                     camera's recording retention policy.
+                  - rtsp.rs: the RTSP *server* on port 5544 - every camera
+                    is also a `Supervisor::acquire_viewer` caller, same as
+                    a WebRTC viewer (see "RTSP server" below).
                   Serves the built frontend as static files.
 frontend/       - Svelte + TypeScript + Vite. Dark, Ubiquiti-Protect-style
                   dashboard: camera grid, per-camera live WebRTC tile,
@@ -321,6 +326,42 @@ Applying motion transitions (and settings changes generally) without
 rebuilding the whole pipeline is the same "dynamic `tee` pad add/remove"
 future work mentioned above for plain settings changes.
 
+## RTSP server
+
+Every camera - including USB ones - is reachable at
+`rtsp://<host>:5544/<camera-id>` for any RTSP-capable third-party
+software (VLC, other NVR/VMS tools, `ffprobe`/`ffmpeg`). This is the
+other half of "USB cameras act like network cameras": the first half
+(consuming an RTSP camera as a client) existed since v0.2; this is
+OmniMonitor acting as the *server* side for all of its cameras, USB
+included.
+
+`omni-server::rtsp` wraps `gstreamer-rtsp-server`, which needs its own
+GLib main loop - blocking, so it runs on a dedicated OS thread, separate
+from the tokio runtime the rest of the server uses. Each camera gets a
+`GstRTSPMediaFactory` whose launch string is just
+`appsrc name=src ! rtpvp8pay name=pay0 pt=96`: when an RTSP client
+connects, the factory's `media-configure` callback (firing on the GLib
+thread) finds that session's `appsrc` and hands off to the tokio runtime
+via `Handle::spawn` - the RTSP client becomes just another
+`Supervisor::acquire_viewer` caller, indistinguishable at that layer from
+a WebRTC viewer. Frames already VP8-encoded by the one running
+`CaptureSession` for that camera are pushed into the `appsrc` as they
+arrive; no second encode pass, and for a USB camera, no second device
+open (which would just fail with "device busy" against the same
+`/dev/videoN` the primary pipeline already holds).
+
+Verified against real RTSP clients, not just "no errors reported":
+`gst-launch-1.0 rtspsrc` decoding VP8 back out, `ffprobe` independently
+reporting the correct codec/resolution over an RTSP session it initiated
+itself, and a USB camera served to an RTSP client and a WebRTC viewer at
+the same time with neither affecting the other.
+
+Mount points are registered/removed as cameras are added/deleted (and
+re-registered idempotently on `/api/cameras/discover`) - not tied to
+recording or motion settings, since registering one is cheap: it doesn't
+start a pipeline until an RTSP client actually connects.
+
 ## Signaling protocol (non-trickle ICE)
 
 `GET/WS /api/stream/:camera_id`:
@@ -380,16 +421,21 @@ Deliberately out of scope for early versions, per project decision: the
 server is plain HTTP on port 8090. If you need TLS, put a reverse proxy
 (Caddy, nginx, Tailscale, etc.) in front of it, or port-forward with your
 own certificate termination. This keeps local/LAN setup friction-free,
-which matters more than TLS for a device that currently has no
-authentication either (see Roadmap).
+which matters more than TLS for a device where the HTTP login is
+itself unauthenticated-by-default over the wire (a plain cookie, no
+encryption) and the RTSP server (below) has no auth concept at all.
 
-## Known limitations / honest gaps in v0.4
+## Known limitations / honest gaps in v0.5
 
 - **Single account, no rate limiting on login, no lockout after repeated
   failures.** Anyone who can reach port 8090 can attempt to log in; a
   successful session then has full access to view, reconfigure, and
   delete recordings for every camera. Fine on a trusted LAN, not
   something to expose to the open internet as-is.
+- **The RTSP server (port 5544) has no authentication at all** - RTSP
+  itself supports basic/digest auth, but it isn't wired up. Anyone who
+  can reach port 5544 can view any camera's live stream. Treat it the
+  same as the HTTP API: fine on a trusted LAN, not for the open internet.
 - **A settings change disconnects active viewers of that camera** (see
   "One shared pipeline per camera" above) rather than applying live -
   and for `RecordingTrigger::Motion` cameras, this now also happens on

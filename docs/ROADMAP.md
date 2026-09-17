@@ -65,15 +65,31 @@ order the project intends to tackle things.
 - [x] Frontend: motion sensitivity/webhook settings, a live "MOTION" tile
       badge (polled), and an events tab alongside the recordings browser.
 
-## v0.4 - auth - partially done
+## v0.4 - auth - done
 
 - [x] Authentication: single admin account, argon2-hashed password,
       server-side session tokens in an `HttpOnly` cookie
       (`omni-server::auth`). Bootstrapped on first boot via
       `OMNI_ADMIN_PASSWORD` or a randomly generated password printed to
       the log once. Change-password endpoint + UI.
-- [ ] Multi-user / per-camera permissions - still single-account only.
-- [ ] Still HTTP-first, but document a recommended reverse-proxy TLS setup.
+- [ ] Still HTTP-first (see "HTTPS" in `docs/ARCHITECTURE.md`) - a
+      recommended reverse-proxy TLS setup is documented as future work,
+      not written up yet.
+
+## v0.5 - RTSP server - done
+
+- [x] RTSP *server* on port 5544: every camera, including USB ones, is
+      reachable at `rtsp://<host>:5544/<camera-id>` for third-party
+      NVR/VMS/player software - the other half of "USB cameras act like
+      network cameras" (`omni-server::rtsp`, `gstreamer-rtsp-server`).
+      An RTSP client is just another `Supervisor::acquire_viewer` caller,
+      so it shares the same capture pipeline as WebRTC viewers and
+      recording, with no second device open or encode pass.
+- [x] Verified against real, independent RTSP clients - not just
+      `gst-launch`: `ffprobe` establishing its own RTSP session and
+      correctly reporting codec/resolution, and a USB camera served to an
+      RTSP client and a WebRTC viewer at the same time with neither
+      affecting the other.
 
 ## Later / unscheduled
 
@@ -84,10 +100,10 @@ order the project intends to tackle things.
       for `RecordingTrigger::Motion` cameras noted in
       `docs/ARCHITECTURE.md` (event tracking needs to live above the
       per-pipeline-instance watcher, keyed by camera).
+- [ ] Multi-user / per-camera permissions - still single-account only.
+- [ ] RTSP server authentication (basic/digest) - port 5544 is currently
+      wide open to anyone who can reach it.
 - [ ] ONVIF/mDNS discovery for RTSP cameras, instead of adding by URL.
-- [ ] RTSP *server* on port 5544, so OmniMonitor's own streams (including
-      USB cameras!) can be re-consumed by third-party NVR/VMS software -
-      this is the other half of "USB cameras act like network cameras."
 - [ ] Trickle ICE (current signaling waits for full gathering before
       sending offer/answer - simpler, marginally higher latency).
 - [ ] Hardware-accelerated encode (VA-API/NVENC) as an alternative to the

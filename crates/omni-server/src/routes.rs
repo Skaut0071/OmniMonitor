@@ -152,7 +152,14 @@ async fn list_cameras(State(state): State<Arc<AppState>>) -> Json<Vec<Camera>> {
 
 async fn discover_cameras(State(state): State<Arc<AppState>>) -> Json<Vec<Camera>> {
     auto_discover_usb_cameras(&state.db).await;
-    Json(state.db.list_cameras().await.unwrap_or_default())
+    let cameras = state.db.list_cameras().await.unwrap_or_default();
+    // Idempotent (replaces any existing mount point for a camera), so
+    // just re-registering everyone here is simpler than tracking which
+    // ones were actually new.
+    for camera in &cameras {
+        state.rtsp_server.add_camera(Arc::clone(&state), camera.clone());
+    }
+    Json(cameras)
 }
 
 /// Only RTSP cameras can be added by hand through this endpoint - USB
@@ -192,6 +199,9 @@ async fn create_camera(
         .upsert_camera(&camera)
         .await
         .map_err(internal_error)?;
+    state
+        .rtsp_server
+        .add_camera(Arc::clone(&state), camera.clone());
 
     Ok(Json(camera))
 }
@@ -360,6 +370,7 @@ async fn delete_camera(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     state.supervisor.stop(id).await;
+    state.rtsp_server.remove_camera(id);
     state.db.delete_camera(id).await.map_err(internal_error)?;
     Ok(StatusCode::NO_CONTENT)
 }

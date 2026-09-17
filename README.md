@@ -5,12 +5,13 @@ for a Ubiquiti-Protect-style dashboard UI/UX with **USB webcams treated as
 first-class cameras** - plug in a UVC camera over USB and it gets the same
 live-preview and recording pipeline a network/RTSP camera would.
 
-Status: **early (v0.4)**. Live preview over WebRTC, continuous or
+Status: **early (v0.5)**. Live preview over WebRTC, continuous or
 motion-triggered segmented recording with retention, motion detection
-with webhook alerts, and single-account login all work end-to-end for
-USB *and* RTSP cameras (most WiFi/PoE IP cameras speak RTSP - that's the
-protocol this targets for network cameras). See
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next and
+with webhook alerts, single-account login, and an RTSP server that
+re-serves every camera (USB included) to third-party NVR/VMS/player
+software all work end-to-end for USB *and* RTSP cameras (most WiFi/PoE IP
+cameras speak RTSP - that's the protocol this targets for network
+cameras). See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how it's built and why.
 
 ## Stack
@@ -20,8 +21,9 @@ protocol this targets for network cameras). See
 - **Frontend:** Svelte + TypeScript (Vite), with a small Rust crate
   (`omni-wasm`) compiled to WebAssembly for validation logic shared
   verbatim with the server.
-- **Ports:** web UI/API on **8090** (HTTP, no TLS by design - see below),
-  RTSP reserved on **5544** for a future milestone.
+- **Ports:** web UI/API on **8090** (HTTP, no TLS by design - see below);
+  every camera also reachable at `rtsp://<host>:5544/<camera-id>` for
+  third-party RTSP clients (VLC, `ffprobe`, other NVR/VMS software).
 
 ## Quickstart (Linux)
 
@@ -32,9 +34,10 @@ sudo apt-get update
 sudo apt-get install -y build-essential pkg-config curl git libssl-dev \
     libv4l-dev clang cmake \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-    libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-    gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools
+    libgstreamer-plugins-bad1.0-dev libgstrtspserver-1.0-dev \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+    gstreamer1.0-libav gstreamer1.0-tools
 ```
 
 Also needed: [Rust](https://rustup.rs) (stable), [wasm-pack](https://rustwasm.github.io/wasm-pack/)
@@ -77,7 +80,10 @@ Click the gear icon on a camera tile to turn on recording (continuous, or
 only while motion is detected) and set a retention limit (max age and/or
 max total size), and to turn on motion detection/webhook alerts
 independently of recording. Click the record icon to browse/play back
-recordings and view the motion event log.
+recordings and view the motion event log. Every camera is also available
+to any RTSP client at `rtsp://<host>:5544/<camera-id>` (its id from
+`GET /api/cameras`) with no extra setup - try
+`ffplay rtsp://<host>:5544/<camera-id>` or add it in VLC.
 
 ### Development loop
 
@@ -119,8 +125,9 @@ Every endpoint above `/api/auth/login` requires a valid session cookie
 Deliberate choice for early versions: the server speaks plain HTTP on
 8090. If you need TLS, put a reverse proxy in front of it or use your own
 port-forwarding/tunnel setup. There's now a login (see above), but it's
-still a single account with no rate limiting - don't expose this to the
-open internet as-is.
+still a single account with no rate limiting, and the RTSP port (5544)
+has no authentication at all yet - don't expose either to the open
+internet as-is.
 
 ## License
 
