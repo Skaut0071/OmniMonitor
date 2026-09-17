@@ -392,27 +392,41 @@ first" discipline established during the motion-detection valve
 debugging (see above) - swapping the Variant-wrapped bool for a plain
 one was the one-line fix that made it work.
 
-## Signaling protocol (non-trickle ICE)
+## Signaling protocol (trickle ICE, since v0.6)
 
 `GET/WS /api/stream/:camera_id`:
 
-1. Browser opens the WebSocket, sends `{"type":"offer","sdp":"..."}` once
-   its own ICE gathering completes (so the offer already contains all local
-   candidates).
+1. Browser opens the WebSocket, creates an offer, and sends
+   `{"type":"offer","sdp":"..."}` immediately after `setLocalDescription`
+   - it does not wait for its own ICE gathering to finish.
 2. Server looks up the camera, acquires a viewer slot on its (possibly
    freshly-started) shared pipeline via the supervisor, creates an
-   `RTCPeerConnection` + answer, waits for its own ICE gathering to
-   complete, and replies `{"type":"answer","sdp":"..."}`.
-3. The viewer slot and the peer connection both live exactly as long as
+   `RTCPeerConnection` + answer, and replies
+   `{"type":"answer","sdp":"..."}` as soon as the local description is
+   set - likewise without waiting for gathering.
+3. Both sides trickle `{"type":"ice_candidate","candidate":{...}}`
+   messages as candidates are discovered, for the life of the socket.
+   `omni_webrtc::StreamSession::start` returns an
+   `mpsc::UnboundedReceiver<RTCIceCandidateInit>` fed by
+   `on_ice_candidate`, which `omni-server::ws` forwards to the browser;
+   incoming candidates from the browser go straight to
+   `StreamSession::add_ice_candidate`. A browser candidate that arrives
+   before the server's session exists yet (a race that's possible since
+   nothing stops the browser from trickling immediately after sending the
+   offer) is queued and applied once the session starts.
+4. The viewer slot and the peer connection both live exactly as long as
    the WebSocket stays open. If the underlying pipeline fails (bus error)
    or is superseded (a settings-change restart), the server sends
    `{"type":"error","message":"..."}` and closes the socket itself -
    the browser doesn't have to notice a dangling peer connection on its
    own.
 
-Trickle ICE isn't implemented yet - full-gathering-before-send adds a
-little latency (typically well under a second on a LAN) but is much
-simpler. Worth revisiting if cross-NAT latency becomes a real complaint.
+This replaces the earlier "wait for full ICE gathering before sending
+either side's SDP" approach (simpler, but added up to a second of latency
+before the connection could even start negotiating) - worth it now that
+the mechanism is proven end-to-end elsewhere in the project (RTSP,
+motion detection) via the same "verify real behavior, not just
+successful compiles" discipline.
 
 ## Authentication
 

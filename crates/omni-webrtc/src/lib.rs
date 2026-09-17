@@ -16,10 +16,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use omni_capture::EncodedFrame;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_VP8};
 use webrtc::api::APIBuilder;
+use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::media::Sample;
@@ -30,6 +31,11 @@ use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
+
+/// Re-exported so `omni-server::ws` can speak the wire format for a
+/// trickled ICE candidate without depending on the `webrtc` crate
+/// directly - this crate is the only one that needs to.
+pub use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 
 /// A live browser<->camera WebRTC session for one viewer. Dropping this
 /// tears down the peer connection and stops the frame-forwarding task.
@@ -45,12 +51,17 @@ pub struct StreamSession {
 impl StreamSession {
     /// Consumes a browser SDP offer plus a live view onto a running
     /// camera pipeline (frames + pipeline-health), and returns the
-    /// session plus the SDP answer to send back.
+    /// session, the SDP answer to send back, and a channel of this
+    /// server's own ICE candidates as they're discovered (trickle ICE -
+    /// the answer is sent back as soon as the local description is set,
+    /// not after gathering completes, so the caller should start
+    /// forwarding candidates from this channel to the browser
+    /// immediately rather than waiting for it to close).
     pub async fn start(
         offer_sdp: &str,
         frames: broadcast::Receiver<EncodedFrame>,
         mut error: watch::Receiver<Option<String>>,
-    ) -> Result<(Self, String)> {
+    ) -> Result<(Self, String, mpsc::UnboundedReceiver<RTCIceCandidateInit>)> {
         let mut media_engine = MediaEngine::default();
         media_engine
             .register_default_codecs()
@@ -107,6 +118,28 @@ impl StreamSession {
             },
         ));
 
+        // Trickle ICE: forward each locally discovered candidate to the
+        // caller as soon as it's found, instead of making the browser
+        // wait for `on_ice_candidate(None)` (gathering complete) before
+        // it gets an answer at all.
+        let (candidate_tx, candidate_rx) = mpsc::unbounded_channel::<RTCIceCandidateInit>();
+        peer_connection.on_ice_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
+            let candidate_tx = candidate_tx.clone();
+            Box::pin(async move {
+                let Some(candidate) = candidate else {
+                    // Gathering finished - nothing to forward, and the
+                    // channel closing is enough signal for the receiver.
+                    return;
+                };
+                match candidate.to_json() {
+                    Ok(init) => {
+                        let _ = candidate_tx.send(init);
+                    }
+                    Err(err) => tracing::warn!(%err, "failed to serialize local ICE candidate"),
+                }
+            })
+        }));
+
         let offer = RTCSessionDescription::offer(offer_sdp.to_owned())
             .context("parsing offer SDP")?;
         peer_connection
@@ -119,17 +152,15 @@ impl StreamSession {
             .await
             .context("creating answer")?;
 
-        let mut gather_complete = peer_connection.gathering_complete_promise().await;
         peer_connection
             .set_local_description(answer)
             .await
             .context("setting local description")?;
-        let _ = gather_complete.recv().await;
 
         let local_desc = peer_connection
             .local_description()
             .await
-            .context("no local description after gathering")?;
+            .context("no local description after set_local_description")?;
 
         let forward_task = tokio::spawn(forward_frames(track, frames));
 
@@ -158,7 +189,19 @@ impl StreamSession {
                 _error_watch_task: error_watch_task,
             },
             local_desc.sdp,
+            candidate_rx,
         ))
+    }
+
+    /// Feeds a trickled ICE candidate from the browser in. Safe to call
+    /// before or after the connection reaches a connected state -
+    /// `webrtc-rs` queues candidates that arrive before the remote
+    /// description would otherwise make them usable.
+    pub async fn add_ice_candidate(&self, candidate: RTCIceCandidateInit) -> Result<()> {
+        self.peer_connection
+            .add_ice_candidate(candidate)
+            .await
+            .context("adding remote ICE candidate")
     }
 
     pub async fn close(&self) -> Result<()> {

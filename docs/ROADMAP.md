@@ -105,6 +105,18 @@ order the project intends to tackle things.
       correct password all tested with `ffprobe` against a live USB
       camera's mount point.
 
+## v0.6 - trickle ICE - done
+
+- [x] Both the browser and server now send their SDP as soon as
+      `setLocalDescription` resolves and trickle ICE candidates
+      individually as they're discovered, instead of waiting for full
+      gathering before exchanging either side's SDP - removes up to
+      ~1s of avoidable connection-setup latency, more on cross-NAT
+      links. `omni_webrtc::StreamSession::start` now returns a candidate
+      channel; `omni-server::ws` and `CameraTile.svelte` forward
+      candidates over the existing signaling WebSocket in both
+      directions.
+
 ## Later / unscheduled
 
 - [ ] Apply camera settings changes (recording toggle, resolution, motion
@@ -118,8 +130,6 @@ order the project intends to tackle things.
       and the RTSP credential (above) is a single shared secret too, not
       per-camera.
 - [ ] ONVIF/mDNS discovery for RTSP cameras, instead of adding by URL.
-- [ ] Trickle ICE (current signaling waits for full gathering before
-      sending offer/answer - simpler, marginally higher latency).
 - [ ] Hardware-accelerated encode (VA-API/NVENC) as an alternative to the
       software `vp8enc` path, for higher camera counts on modest hardware.
 - [ ] H.264 passthrough for RTSP cameras that already send it, instead of

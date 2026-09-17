@@ -16,19 +16,6 @@
   let ws: WebSocket | null = null;
   let motionPoll: ReturnType<typeof setInterval> | null = null;
 
-  function waitForIceGatheringComplete(peer: RTCPeerConnection): Promise<void> {
-    if (peer.iceGatheringState === "complete") return Promise.resolve();
-    return new Promise((resolve) => {
-      function check() {
-        if (peer.iceGatheringState === "complete") {
-          peer.removeEventListener("icegatheringstatechange", check);
-          resolve();
-        }
-      }
-      peer.addEventListener("icegatheringstatechange", check);
-    });
-  }
-
   async function connect() {
     status = "connecting";
     errorMessage = "";
@@ -43,6 +30,12 @@
         videoEl.srcObject = event.streams[0];
       }
       status = "live";
+    };
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "ice_candidate", candidate: event.candidate.toJSON() }));
+      }
     };
 
     pc.onconnectionstatechange = () => {
@@ -68,6 +61,13 @@
           status = "error";
           errorMessage = (e as Error).message;
         }
+      } else if (msg.type === "ice_candidate") {
+        try {
+          await pc?.addIceCandidate(msg.candidate);
+        } catch {
+          // A late/duplicate candidate after the connection already
+          // settled isn't worth surfacing as a tile error.
+        }
       } else if (msg.type === "error") {
         status = "error";
         errorMessage = msg.message;
@@ -84,7 +84,6 @@
       try {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        await waitForIceGatheringComplete(pc);
         ws?.send(JSON.stringify({ type: "offer", sdp: pc.localDescription?.sdp }));
       } catch (e) {
         status = "error";
