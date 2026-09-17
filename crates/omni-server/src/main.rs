@@ -1,4 +1,5 @@
 mod discovery;
+mod motion;
 mod retention;
 mod routes;
 mod state;
@@ -38,16 +39,17 @@ async fn main() -> anyhow::Result<()> {
 
     auto_discover_usb_cameras(&db).await;
 
-    let supervisor = Arc::new(Supervisor::new(PathBuf::from(&config.data_dir)));
+    let supervisor = Arc::new(Supervisor::new(PathBuf::from(&config.data_dir), db.clone()));
 
-    // Cameras with recording enabled get a persistent pipeline running
-    // from boot, independent of whether anyone is watching live.
+    // Cameras with recording and/or standalone motion detection enabled
+    // get a persistent pipeline running from boot, independent of
+    // whether anyone is watching live.
     for camera in db.list_cameras().await.unwrap_or_default() {
-        if camera.recording.enabled {
+        if camera.recording.enabled || camera.motion.enabled {
             if let Err(err) = supervisor.ensure_running(&camera).await {
-                tracing::error!(camera = %camera.id, %err, "failed to start recording pipeline at boot");
+                tracing::error!(camera = %camera.id, %err, "failed to start pipeline at boot");
             } else {
-                tracing::info!(camera = %camera.id, name = %camera.name, "recording pipeline started");
+                tracing::info!(camera = %camera.id, name = %camera.name, "pipeline started at boot");
             }
         }
     }

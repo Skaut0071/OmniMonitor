@@ -1,7 +1,12 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from "svelte";
-  import init, { validate_retention, validate_segment_seconds } from "./wasm/omni_wasm.js";
-  import { updateCamera, type Camera } from "./api";
+  import init, {
+    validate_retention,
+    validate_segment_seconds,
+    validate_sensitivity,
+    validate_webhook_url,
+  } from "./wasm/omni_wasm.js";
+  import { updateCamera, type Camera, type RecordingTrigger } from "./api";
 
   export let camera: Camera;
 
@@ -24,7 +29,12 @@
   };
 
   let recordingEnabled = camera.recording.enabled;
+  let recordingTrigger: RecordingTrigger = camera.recording.trigger;
   let segmentMinutes = camera.recording.segment_seconds / 60;
+
+  let motionEnabled = camera.motion.enabled;
+  let motionSensitivity = camera.motion.sensitivity;
+  let webhookUrl = camera.motion.webhook_url ?? "";
 
   let ageEnabled = camera.recording.retention_max_age_secs != null;
   let ageValue = camera.recording.retention_max_age_secs
@@ -56,6 +66,7 @@
     const segmentSeconds = Math.round(segmentMinutes * 60);
     const maxAgeSecs = ageEnabled ? Math.round(ageValue * AGE_UNIT_SECONDS[ageUnit]) : null;
     const maxSizeBytes = sizeEnabled ? Math.round(sizeValue * SIZE_UNIT_BYTES[sizeUnit]) : null;
+    const trimmedWebhook = webhookUrl.trim();
 
     try {
       validate_segment_seconds(segmentSeconds);
@@ -64,6 +75,10 @@
         maxAgeSecs != null ? BigInt(maxAgeSecs) : null,
         maxSizeBytes != null ? BigInt(maxSizeBytes) : null,
       );
+      validate_sensitivity(motionSensitivity);
+      if (trimmedWebhook) {
+        validate_webhook_url(trimmedWebhook);
+      }
     } catch (e) {
       error = (e as Error).message;
       return;
@@ -74,9 +89,15 @@
       await updateCamera(camera.id, {
         recording: {
           enabled: recordingEnabled,
+          trigger: recordingTrigger,
           segment_seconds: segmentSeconds,
           retention_max_age_secs: maxAgeSecs,
           retention_max_size_bytes: maxSizeBytes,
+        },
+        motion: {
+          enabled: motionEnabled,
+          sensitivity: motionSensitivity,
+          webhook_url: trimmedWebhook || null,
         },
       });
       dispatch("updated");
@@ -99,14 +120,28 @@
     aria-label="Camera recording settings"
     on:click|stopPropagation
   >
-    <h2>{camera.name} - Recording</h2>
+    <h2>{camera.name} - Recording &amp; motion</h2>
 
     <label class="row">
       <input type="checkbox" bind:checked={recordingEnabled} disabled={!wasmReady} />
-      Record continuously
+      Enable recording
     </label>
 
     {#if recordingEnabled}
+      <label>
+        Record
+        <select bind:value={recordingTrigger} disabled={!wasmReady}>
+          <option value="continuous">Continuously</option>
+          <option value="motion">Only while motion is detected</option>
+        </select>
+      </label>
+      {#if recordingTrigger === "motion" && !motionEnabled}
+        <p class="hint">
+          Motion detection will run automatically to gate recording, even though "Detect motion"
+          below is off - that switch only controls event logging/webhooks.
+        </p>
+      {/if}
+
       <label>
         Segment length (minutes)
         <input
@@ -155,6 +190,34 @@
         </div>
       {/if}
     {/if}
+
+    <hr />
+
+    <label class="row">
+      <input type="checkbox" bind:checked={motionEnabled} disabled={!wasmReady} />
+      Detect motion (log events &amp; webhook)
+    </label>
+
+    <label>
+      Sensitivity ({motionSensitivity})
+      <input
+        type="range"
+        min="1"
+        max="100"
+        bind:value={motionSensitivity}
+        disabled={!wasmReady}
+      />
+    </label>
+
+    <label>
+      Webhook URL (optional)
+      <input
+        type="text"
+        bind:value={webhookUrl}
+        placeholder="https://example.com/hooks/motion"
+        disabled={!wasmReady}
+      />
+    </label>
 
     {#if error}
       <p class="error">{error}</p>
@@ -213,6 +276,7 @@
     font-size: 0.85rem;
   }
   input[type="number"],
+  input[type="text"],
   select {
     background: var(--bg);
     border: 1px solid var(--border);
@@ -220,6 +284,14 @@
     padding: 0.45rem 0.6rem;
     color: var(--text);
     font-size: 0.9rem;
+  }
+  input[type="range"] {
+    width: 100%;
+  }
+  hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 0.25rem 0;
   }
   .unit-row {
     display: flex;

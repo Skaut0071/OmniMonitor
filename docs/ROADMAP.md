@@ -47,15 +47,23 @@ order the project intends to tackle things.
       "device busy" race from restarting the replacement pipeline before
       the old one released the device. See `docs/ARCHITECTURE.md`.
 
-## v0.3 - motion detection & alerting
+## v0.3 - motion detection & alerting - done
 
-- [ ] Frame-diff or lightweight ML-based motion detection on the decoded
-      stream.
-- [ ] Event metadata table in SQLite (start/end time, camera, trigger
-      reason), independent of raw recording segments, so the future
-      timeline UI has something richer to query than just file listings.
-- [ ] "Record only on motion" mode, building on the event table.
-- [ ] Basic notification hook (webhook out) on motion events.
+- [x] Frame-diff motion detection on a downscaled raw-video branch (no
+      OpenCV/ML dependency - cheap enough to run continuously per camera).
+- [x] Motion-event metadata table in SQLite (start/end time, camera),
+      independent of raw recording segments, queryable via
+      `GET /api/cameras/:id/events`.
+- [x] "Record only on motion" mode (`recording.trigger = "motion"`).
+      Implemented as a full pipeline rebuild on each motion transition,
+      not a live-toggled element - see `docs/ARCHITECTURE.md` for why a
+      GStreamer `valve` was tried first and didn't work out after testing
+      it end-to-end (three distinct failure modes, none visible from
+      inspecting the pipeline string).
+- [x] Webhook notification (JSON POST) on motion start, with sensitivity
+      and the webhook URL configurable per camera.
+- [x] Frontend: motion sensitivity/webhook settings, a live "MOTION" tile
+      badge (polled), and an events tab alongside the recordings browser.
 
 ## v0.4 - multi-user & auth
 
@@ -65,9 +73,13 @@ order the project intends to tackle things.
 
 ## Later / unscheduled
 
-- [ ] Apply camera settings changes (recording toggle, resolution, ...)
-      without disconnecting active viewers - needs dynamic GStreamer
-      `tee` pad add/remove instead of a full pipeline restart.
+- [ ] Apply camera settings changes (recording toggle, resolution, motion
+      transitions, ...) without disconnecting active viewers - needs
+      dynamic GStreamer `tee` pad add/remove instead of a full pipeline
+      restart. Would also fix the motion-events logging fidelity issue
+      for `RecordingTrigger::Motion` cameras noted in
+      `docs/ARCHITECTURE.md` (event tracking needs to live above the
+      per-pipeline-instance watcher, keyed by camera).
 - [ ] ONVIF/mDNS discovery for RTSP cameras, instead of adding by URL.
 - [ ] RTSP *server* on port 5544, so OmniMonitor's own streams (including
       USB cameras!) can be re-consumed by third-party NVR/VMS software -

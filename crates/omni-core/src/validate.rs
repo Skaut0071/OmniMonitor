@@ -20,6 +20,10 @@ pub enum ValidationError {
     InvalidRtspUrl,
     #[error("enable recording requires a max age and/or a max size limit, so it doesn't fill the disk forever")]
     RecordingWithoutRetentionLimit,
+    #[error("motion sensitivity must be between 1 and 100")]
+    InvalidSensitivity,
+    #[error("webhook URL must start with http:// or https://")]
+    InvalidWebhookUrl,
 }
 
 pub fn validate_camera_name(name: &str) -> Result<(), ValidationError> {
@@ -71,6 +75,21 @@ pub fn validate_retention(
 ) -> Result<(), ValidationError> {
     if recording_enabled && max_age_secs.is_none() && max_size_bytes.is_none() {
         return Err(ValidationError::RecordingWithoutRetentionLimit);
+    }
+    Ok(())
+}
+
+pub fn validate_sensitivity(sensitivity: u8) -> Result<(), ValidationError> {
+    if !(1..=100).contains(&sensitivity) {
+        return Err(ValidationError::InvalidSensitivity);
+    }
+    Ok(())
+}
+
+pub fn validate_webhook_url(url: &str) -> Result<(), ValidationError> {
+    let trimmed = url.trim();
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        return Err(ValidationError::InvalidWebhookUrl);
     }
     Ok(())
 }
@@ -130,5 +149,23 @@ mod tests {
             validate_rtsp_url("http://example.com"),
             Err(ValidationError::InvalidRtspUrl)
         );
+    }
+
+    #[test]
+    fn rejects_out_of_range_sensitivity() {
+        assert_eq!(
+            validate_sensitivity(0),
+            Err(ValidationError::InvalidSensitivity)
+        );
+        assert!(validate_sensitivity(50).is_ok());
+    }
+
+    #[test]
+    fn rejects_non_http_webhook() {
+        assert_eq!(
+            validate_webhook_url("ftp://example.com"),
+            Err(ValidationError::InvalidWebhookUrl)
+        );
+        assert!(validate_webhook_url("https://example.com/hook").is_ok());
     }
 }

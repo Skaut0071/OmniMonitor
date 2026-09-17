@@ -10,7 +10,7 @@ pitch is two things combined:
    as full peers of network/RTSP cameras - the same live-preview and
    recording pipeline handles both.
 
-v0.2 targets Linux only, HTTP only (no TLS - see "HTTPS" below), single-box
+v0.3 targets Linux only, HTTP only (no TLS - see "HTTPS" below), single-box
 deployments. Default ports: **8090** for the web UI/API, **5544** for RTSP
 *server* (reserved for a future milestone - re-serving OmniMonitor's own
 streams over RTSP - not implemented yet; consuming a camera's RTSP stream
@@ -23,7 +23,7 @@ implemented).
   touches untrusted network input (camera RTSP streams, browser WebRTC
   offers), plus genuinely good async I/O (tokio) for handling many camera
   streams concurrently.
-- **SQLite via `sqlx`** for camera configuration and (later) event metadata.
+- **SQLite via `sqlx`** for camera configuration and motion-event metadata.
   This is a single-box NVR: zero ops, file-based (backs up alongside
   recordings), and far more throughput than camera-config-change or
   event-insert workloads need. If OmniMonitor ever grows a multi-node
@@ -52,12 +52,14 @@ implemented).
 ```
 crates/
   omni-core     - shared types (Camera, CameraKind, RecordingSettings,
-                  AppConfig) + validation. No tokio/gstreamer/etc. deps -
-                  must compile to wasm32.
-  omni-db       - SQLite storage for camera config (sqlx).
+                  MotionSettings, MotionEvent, AppConfig) + validation.
+                  No tokio/gstreamer/etc. deps - must compile to wasm32.
+  omni-db       - SQLite storage for camera config + motion events (sqlx).
   omni-capture  - V4L2 device discovery (v4l) + GStreamer capture/encode/
-                  record pipeline ({v4l2src|rtspsrc} -> decodebin -> vp8enc
-                  -> tee -> {appsink, splitmuxsink}).
+                  record/motion-detect pipeline ({v4l2src|rtspsrc} ->
+                  decodebin -> tee(raw) -> vp8enc -> tee(encoded) ->
+                  {appsink, splitmuxsink}, with the raw tee optionally
+                  feeding a low-res motion-detection appsink).
   omni-webrtc   - Turns an SDP offer + a live-frame feed into a WebRTC
                   connection (webrtc-rs) for one viewer. Owns RTP/ICE/DTLS;
                   knows nothing about V4L2, RTSP, pixels, or recording.
@@ -68,14 +70,18 @@ crates/
                   - routes.rs / ws.rs: REST API + WebRTC signaling.
                   - supervisor.rs: owns the one running capture pipeline
                     per camera, shared across every live viewer and
-                    recording (see below).
+                    recording, and rebuilds it on motion transitions for
+                    `RecordingTrigger::Motion` (see below).
+                  - motion.rs: turns a camera's raw motion-active signal
+                    into logged events (SQLite) and an optional webhook
+                    call.
                   - retention.rs: background reaper enforcing each
                     camera's recording retention policy.
                   Serves the built frontend as static files.
 frontend/       - Svelte + TypeScript + Vite. Dark, Ubiquiti-Protect-style
                   dashboard: camera grid, per-camera live WebRTC tile,
-                  add/remove cameras, recording settings, recordings
-                  browser/player.
+                  add/remove cameras, recording + motion-detection
+                  settings, recordings browser/player, motion event log.
 ```
 
 ## The USB-camera-as-network-camera capture pipeline
@@ -167,6 +173,10 @@ want to view the same camera at once - so there can only be one
   Applying settings changes without dropping active viewers is future
   work (see `docs/ROADMAP.md`); it would need dynamic `tee` pad add/remove
   instead of a full pipeline restart.
+- A camera with `RecordingTrigger::Motion` gets the *same* full-pipeline
+  rebuild on every motion start/stop, via
+  `Supervisor::replace_pipeline`/`spawn_motion_recording_watcher` - see
+  "Motion detection" below for why a live-toggled element didn't work out.
 
 Two real bugs were found by testing this against actual hardware rather
 than reasoning about it in the abstract, and both are fixed in the current
@@ -209,6 +219,108 @@ keyframe-max-dist=60`, i.e. every ~2s at 30fps), so actual segment length
 is typically a couple of seconds short of the configured value - fine at
 the multi-minute segment lengths this is meant for.
 
+## Motion detection
+
+When a camera needs motion detection - `motion.enabled`, or
+`recording.trigger == Motion` (which implies it, regardless of
+`motion.enabled`) - its pipeline gains a third tee branch off the *raw*
+(pre-encode) video: downscaled to 160x90 grayscale at 5fps and pulled into
+Rust via an `appsink`. `omni_capture::pipeline` does simple consecutive-
+frame differencing there (count pixels that changed by more than a fixed
+per-pixel threshold; compare the fraction against a sensitivity-derived
+threshold) - no OpenCV, no ML, just enough to be genuinely useful for
+"something moved in frame" at negligible CPU cost (14,400 pixels, 5
+times a second). A short hold window (5s) after the last qualifying frame
+keeps the reported state from flapping on brief pauses. `sensitivity`
+(1-100, API/UI-facing) maps to a required "fraction of frame changed"
+between 0.06 (1, needs a big change) and 0.002 (100, a tiny change
+triggers it) - see `motion_required_fraction`.
+
+The result is a `watch::Receiver<bool>` (`CaptureHandle::motion`) that two
+independent consumers watch:
+
+- `omni-server::motion::spawn_watcher` - logs each start/end to the
+  `motion_events` table and, if `motion.webhook_url` is set, POSTs a
+  `{"event":"motion_started",...}` JSON body on start (fire-and-forget,
+  5s timeout, no retry queue - a slow/broken webhook endpoint just logs a
+  warning, it doesn't block detection).
+- `omni-server::supervisor::spawn_motion_recording_watcher` - only for
+  `RecordingTrigger::Motion` cameras: rebuilds the pipeline (recording
+  branch present or absent) on every transition, per below.
+
+### Why motion-gated recording rebuilds the whole pipeline
+
+The first implementation used a GStreamer `valve` between the encoded tee
+and `splitmuxsink`, toggled live from the motion-detection callback -
+"gate a branch that's always there" is the obvious design, and it's what
+the recording-trigger UI language ("only record while motion is
+detected") suggests happens under the hood. It doesn't, and getting there
+took three rounds of testing against a real running pipeline (not just
+inspecting the pipeline string), each surfacing a different failure that
+reasoning about GStreamer's docs alone didn't predict:
+
+1. A valve starting **closed** (`drop=true`) never lets its first buffer
+   through to `splitmuxsink`, which can then never complete preroll -
+   which blocks the *entire* pipeline's transition to PLAYING, not just
+   the recording branch. Confirmed with a plain buffer-count probe on
+   *unrelated* branches (live view, motion detection itself): zero
+   buffers reached any of them, indefinitely, with no bus error and no
+   indication from `set_state`'s return value that anything was wrong.
+2. Starting the valve **open** and closing it immediately after
+   `set_state(Playing)` returns avoids that deadlock but reintroduces a
+   milder version of it: `set_state` returning doesn't mean real data has
+   started flowing (RTSP negotiation/decoding takes real wall-clock time),
+   so closing "immediately" typically closes it before any buffer got
+   through anyway.
+3. Giving the valve a real settle window (open, sleep ~500ms, then close)
+   fixed *that* - but reopening it later, when motion resumed, reliably
+   left `splitmuxsink` stuck with zero bytes written forever, most likely
+   a keyframe/timestamp discontinuity the muxer doesn't recover from
+   after a stop-start on the same element instance.
+
+None of these are visible from reading the pipeline string or the
+`valve`/`splitmuxsink` documentation in isolation - each was found by
+actually recording end-to-end and checking the resulting file, not by
+checking for bus errors or successful state transitions, which all three
+broken versions reported cleanly.
+
+Given that, motion-gated recording now reuses the same full-pipeline
+rebuild already proven for settings changes: `Supervisor` watches the
+motion signal and calls `replace_pipeline` on every transition, which
+tears down the old pipeline and starts a fresh one with the recording
+branch present or absent to match. The fresh pipeline's *internal* motion
+state has to be seeded from the state it was rebuilt for
+(`MotionConfig::initial_active`) - without that, a freshly-rebuilt
+"recording" pipeline starts assuming "no motion yet", immediately
+re-detects the still-ongoing motion as a new transition, and asks for
+*another* rebuild, in a tight loop (caught by testing, not reasoned out -
+it was rebuilding several times a second).
+
+**Known trade-offs of this approach**, both accepted rather than solved
+for v0.3:
+
+- Active viewers of a `RecordingTrigger::Motion` camera get disconnected
+  on *every* motion transition, not just on an explicit settings change -
+  it's the same restart machinery, so it has the same effect. The
+  frontend's retry path covers it, but it's a rougher experience than
+  gapless would be.
+- The per-pipeline-instance event watcher means a motion event that's
+  still open when a rebuild happens (which motion-triggered recording
+  causes on essentially every "motion starts" transition) gets closed by
+  the *old* pipeline's watcher tearing down and immediately reopened as a
+  *new* event by the incoming pipeline - so the `motion_events` log for a
+  `RecordingTrigger::Motion` camera can show a spurious near-zero-duration
+  event around each transition instead of one continuous one. The
+  recording itself (the file on disk) is unaffected; this is a logging
+  fidelity issue only, specific to combining motion-gated recording with
+  the events feature. Fixing it needs event-open/close tracking to live
+  above the per-pipeline-instance watcher (keyed by camera, surviving
+  rebuilds) - not done yet, see `docs/ROADMAP.md`.
+
+Applying motion transitions (and settings changes generally) without
+rebuilding the whole pipeline is the same "dynamic `tee` pad add/remove"
+future work mentioned above for plain settings changes.
+
 ## Signaling protocol (non-trickle ICE)
 
 `GET/WS /api/stream/:camera_id`:
@@ -240,13 +352,23 @@ own certificate termination. This keeps local/LAN setup friction-free,
 which matters more than TLS for a device that currently has no
 authentication either (see Roadmap).
 
-## Known limitations / honest gaps in v0.2
+## Known limitations / honest gaps in v0.3
 
 - **No authentication.** Anyone who can reach port 8090 can view,
   reconfigure, and delete recordings for any camera. Do not expose this to
   the open internet as-is.
 - **A settings change disconnects active viewers of that camera** (see
-  "One shared pipeline per camera" above) rather than applying live.
+  "One shared pipeline per camera" above) rather than applying live -
+  and for `RecordingTrigger::Motion` cameras, this now also happens on
+  every motion start/stop, not just an explicit settings change (see
+  "Motion detection" above).
+- **The motion-events log can show spurious near-zero-duration entries
+  around each transition for a `RecordingTrigger::Motion` camera**
+  specifically (event-open/close tracking doesn't yet survive the
+  pipeline rebuilds that trigger drives) - see "Motion detection" above.
+  Standalone motion detection (`motion.enabled` without motion-gated
+  recording) doesn't have this problem, since nothing rebuilds the
+  pipeline on a plain motion transition there.
 - **Frame-drop-under-backpressure can transiently corrupt VP8 decode for
   live viewers.** The broadcast channel a lagging viewer falls behind on
   just skips ahead (`RecvError::Lagged`), which can show as a brief glitch
@@ -258,4 +380,4 @@ authentication either (see Roadmap).
   through) will show as discoverable, but starting its stream fails with a
   clear "Device is busy" error rather than silently doing nothing.
 - **No ONVIF/mDNS discovery for RTSP cameras** - they're added by URL by
-  hand. No motion detection yet either. See `docs/ROADMAP.md`.
+  hand. See `docs/ROADMAP.md`.

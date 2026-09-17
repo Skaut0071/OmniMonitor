@@ -40,6 +40,10 @@ sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "chrono", "uuid
 
 v4l = "0.14"
 
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+argon2 = "0.5"
+rand = "0.8"
+
 omni-core = { path = "crates/omni-core" }
 omni-db = { path = "crates/omni-db" }
 omni-capture = { path = "crates/omni-capture" }

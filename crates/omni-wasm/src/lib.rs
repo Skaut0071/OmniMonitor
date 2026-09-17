@@ -41,3 +41,13 @@ pub fn validate_retention(
     validate::validate_retention(recording_enabled, max_age_secs, max_size_bytes)
         .map_err(|e| JsError::new(&e.to_string()))
 }
+
+#[wasm_bindgen]
+pub fn validate_sensitivity(sensitivity: u8) -> Result<(), JsError> {
+    validate::validate_sensitivity(sensitivity).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen]
+pub fn validate_webhook_url(url: &str) -> Result<(), JsError> {
+    validate::validate_webhook_url(url).map_err(|e| JsError::new(&e.to_string()))
+}

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, onDestroy, onMount } from "svelte";
   import type { Camera } from "./api";
-  import { streamWsUrl } from "./api";
+  import { getMotionStatus, streamWsUrl } from "./api";
 
   export let camera: Camera;
 
@@ -10,9 +10,11 @@
   let videoEl: HTMLVideoElement;
   let status: "connecting" | "live" | "error" | "idle" = "idle";
   let errorMessage = "";
+  let motionActive = false;
 
   let pc: RTCPeerConnection | null = null;
   let ws: WebSocket | null = null;
+  let motionPoll: ReturnType<typeof setInterval> | null = null;
 
   function waitForIceGatheringComplete(peer: RTCPeerConnection): Promise<void> {
     if (peer.iceGatheringState === "complete") return Promise.resolve();
@@ -105,10 +107,22 @@
 
   onMount(() => {
     connect();
+    if (camera.motion.enabled || (camera.recording.enabled && camera.recording.trigger === "motion")) {
+      const poll = async () => {
+        try {
+          motionActive = await getMotionStatus(camera.id);
+        } catch {
+          // Transient poll failures aren't worth surfacing as tile errors.
+        }
+      };
+      poll();
+      motionPoll = setInterval(poll, 3000);
+    }
   });
 
   onDestroy(() => {
     disconnect();
+    if (motionPoll) clearInterval(motionPoll);
   });
 </script>
 
@@ -116,6 +130,9 @@
   <div class="tile-header">
     <span class="name">{camera.name}</span>
     <div class="badges">
+      {#if motionActive}
+        <span class="motion-badge" title="Motion detected">MOTION</span>
+      {/if}
       {#if camera.recording.enabled}
         <span class="rec-badge" title="Recording">● REC</span>
       {/if}
@@ -179,6 +196,15 @@
     font-weight: 700;
     letter-spacing: 0.03em;
     color: #e74c3c;
+  }
+  .motion-badge {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    color: #f1c40f;
+    background: rgba(241, 196, 15, 0.15);
+    padding: 0.1rem 0.4rem;
+    border-radius: 999px;
   }
   .icon-btn {
     background: transparent;

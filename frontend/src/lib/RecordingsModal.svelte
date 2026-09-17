@@ -2,19 +2,27 @@
   import { createEventDispatcher, onMount } from "svelte";
   import {
     deleteRecording,
+    listMotionEvents,
     listRecordings,
     recordingUrl,
     type Camera,
+    type MotionEvent,
     type RecordingInfo,
   } from "./api";
 
   export let camera: Camera;
   const dispatch = createEventDispatcher();
 
+  let tab: "recordings" | "events" = "recordings";
+
   let recordings: RecordingInfo[] = [];
   let loading = true;
   let loadError = "";
   let selected: RecordingInfo | null = null;
+
+  let events: MotionEvent[] = [];
+  let eventsLoading = true;
+  let eventsError = "";
 
   async function refresh() {
     loading = true;
@@ -28,6 +36,18 @@
       loadError = (e as Error).message;
     } finally {
       loading = false;
+    }
+  }
+
+  async function refreshEvents() {
+    eventsLoading = true;
+    try {
+      events = await listMotionEvents(camera.id);
+      eventsError = "";
+    } catch (e) {
+      eventsError = (e as Error).message;
+    } finally {
+      eventsLoading = false;
     }
   }
 
@@ -47,11 +67,22 @@
     return new Date(iso).toLocaleString();
   }
 
+  function eventDuration(ev: MotionEvent): string {
+    if (!ev.ended_at) return "ongoing";
+    const secs = Math.round(
+      (new Date(ev.ended_at).getTime() - new Date(ev.started_at).getTime()) / 1000,
+    );
+    return `${secs}s`;
+  }
+
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") dispatch("close");
   }
 
-  onMount(refresh);
+  onMount(() => {
+    refresh();
+    refreshEvents();
+  });
 </script>
 
 <svelte:window on:keydown={onKeydown} />
@@ -65,44 +96,74 @@
     on:click|stopPropagation
   >
     <div class="header">
-      <h2>{camera.name} - Recordings</h2>
+      <h2>{camera.name}</h2>
       <button class="icon" on:click={() => dispatch("close")} aria-label="Close">✕</button>
     </div>
 
-    {#if loading}
+    <div class="tabs">
+      <button class:active={tab === "recordings"} on:click={() => (tab = "recordings")}
+        >Recordings</button
+      >
+      <button class:active={tab === "events"} on:click={() => (tab = "events")}
+        >Motion events</button
+      >
+    </div>
+
+    {#if tab === "recordings"}
+      {#if loading}
+        <p class="hint">Loading…</p>
+      {:else if loadError}
+        <p class="error">{loadError}</p>
+      {:else if recordings.length === 0}
+        <p class="hint">
+          No recordings yet.{camera.recording.enabled
+            ? ""
+            : " Recording is turned off for this camera."}
+        </p>
+      {:else}
+        <div class="body">
+          <div class="list">
+            {#each recordings as rec (rec.filename)}
+              <div class="item" class:active={selected?.filename === rec.filename}>
+                <button class="item-main" on:click={() => (selected = rec)}>
+                  <span class="filename">{formatTime(rec.modified)}</span>
+                  <span class="meta">{formatSize(rec.size_bytes)}</span>
+                </button>
+                <button class="remove" title="Delete" on:click={() => remove(rec)}>✕</button>
+              </div>
+            {/each}
+          </div>
+          <div class="player">
+            {#if selected}
+              <!-- svelte-ignore a11y-media-has-caption -->
+              <video src={recordingUrl(camera.id, selected.filename)} controls autoplay></video>
+              <a class="download" href={recordingUrl(camera.id, selected.filename)} download
+                >Download segment</a
+              >
+            {:else}
+              <p class="hint">Select a recording to play it back.</p>
+            {/if}
+          </div>
+        </div>
+      {/if}
+    {:else if eventsLoading}
       <p class="hint">Loading…</p>
-    {:else if loadError}
-      <p class="error">{loadError}</p>
-    {:else if recordings.length === 0}
+    {:else if eventsError}
+      <p class="error">{eventsError}</p>
+    {:else if events.length === 0}
       <p class="hint">
-        No recordings yet.{camera.recording.enabled
+        No motion events yet.{camera.motion.enabled || camera.recording.trigger === "motion"
           ? ""
-          : " Recording is turned off for this camera."}
+          : " Motion detection is turned off for this camera."}
       </p>
     {:else}
-      <div class="body">
-        <div class="list">
-          {#each recordings as rec (rec.filename)}
-            <div class="item" class:active={selected?.filename === rec.filename}>
-              <button class="item-main" on:click={() => (selected = rec)}>
-                <span class="filename">{formatTime(rec.modified)}</span>
-                <span class="meta">{formatSize(rec.size_bytes)}</span>
-              </button>
-              <button class="remove" title="Delete" on:click={() => remove(rec)}>✕</button>
-            </div>
-          {/each}
-        </div>
-        <div class="player">
-          {#if selected}
-            <!-- svelte-ignore a11y-media-has-caption -->
-            <video src={recordingUrl(camera.id, selected.filename)} controls autoplay></video>
-            <a class="download" href={recordingUrl(camera.id, selected.filename)} download
-              >Download segment</a
-            >
-          {:else}
-            <p class="hint">Select a recording to play it back.</p>
-          {/if}
-        </div>
+      <div class="events-list">
+        {#each events as ev (ev.id)}
+          <div class="event-row">
+            <span class="filename">{formatTime(ev.started_at)}</span>
+            <span class="meta">{eventDuration(ev)}</span>
+          </div>
+        {/each}
       </div>
     {/if}
   </div>
@@ -145,6 +206,40 @@
     color: var(--text-dim);
     cursor: pointer;
     font-size: 0.9rem;
+  }
+  .tabs {
+    display: flex;
+    gap: 0.25rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.5rem;
+  }
+  .tabs button {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    padding: 0.35rem 0.75rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+  }
+  .tabs button.active {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .events-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    overflow-y: auto;
+    max-height: 55vh;
+  }
+  .event-row {
+    display: flex;
+    justify-content: space-between;
+    background: var(--surface-2);
+    border-radius: 6px;
+    padding: 0.5rem 0.6rem;
+    font-size: 0.78rem;
   }
   .body {
     display: grid;

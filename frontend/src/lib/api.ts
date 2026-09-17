@@ -1,8 +1,17 @@
+export type RecordingTrigger = "continuous" | "motion";
+
 export interface RecordingSettings {
   enabled: boolean;
+  trigger: RecordingTrigger;
   segment_seconds: number;
   retention_max_age_secs: number | null;
   retention_max_size_bytes: number | null;
+}
+
+export interface MotionSettings {
+  enabled: boolean;
+  sensitivity: number;
+  webhook_url: string | null;
 }
 
 export interface Camera {
@@ -17,6 +26,7 @@ export interface Camera {
   framerate: number;
   codec: "vp8" | "h264";
   recording: RecordingSettings;
+  motion: MotionSettings;
   status?: "idle" | "streaming" | "error";
 }
 
@@ -26,6 +36,13 @@ export interface RecordingInfo {
   modified: string;
 }
 
+export interface MotionEvent {
+  id: string;
+  camera_id: string;
+  started_at: string;
+  ended_at: string | null;
+}
+
 export interface UpdateCameraRequest {
   name?: string;
   url?: string;
@@ -33,6 +50,7 @@ export interface UpdateCameraRequest {
   height?: number;
   framerate?: number;
   recording?: RecordingSettings;
+  motion?: MotionSettings;
 }
 
 const BASE = "/api";
@@ -103,6 +121,18 @@ export async function deleteRecording(cameraId: string, filename: string): Promi
 
 export function recordingUrl(cameraId: string, filename: string): string {
   return `${BASE}/recordings/${cameraId}/${encodeURIComponent(filename)}`;
+}
+
+export async function getMotionStatus(cameraId: string): Promise<boolean> {
+  const data = await unwrap<{ active: boolean }>(
+    await fetch(`${BASE}/cameras/${cameraId}/motion`),
+    "failed to get motion status",
+  );
+  return data.active;
+}
+
+export async function listMotionEvents(cameraId: string): Promise<MotionEvent[]> {
+  return unwrap(await fetch(`${BASE}/cameras/${cameraId}/events`), "failed to list events");
 }
 
 export function streamWsUrl(cameraId: string): string {

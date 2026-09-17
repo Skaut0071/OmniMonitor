@@ -10,7 +10,10 @@ use tower::ServiceExt;
 use tower_http::services::ServeFile;
 use uuid::Uuid;
 
-use omni_core::{validate, Camera, CameraKind, RecordingSettings, StreamCodec};
+use omni_core::{
+    validate, Camera, CameraKind, MotionEvent, MotionSettings, RecordingSettings,
+    RecordingTrigger, StreamCodec,
+};
 
 use crate::discovery::auto_discover_usb_cameras;
 use crate::state::AppState;
@@ -30,6 +33,8 @@ pub fn api_routes() -> Router<Arc<AppState>> {
             "/api/recordings/:id/:filename",
             get(get_recording).delete(delete_recording),
         )
+        .route("/api/cameras/:id/motion", get(get_motion_status))
+        .route("/api/cameras/:id/events", get(list_events))
         .route("/api/stream/:camera_id", get(stream_ws_handler))
 }
 
@@ -76,6 +81,7 @@ async fn create_camera(
         framerate: 30,
         codec: StreamCodec::Vp8,
         recording: RecordingSettings::default(),
+        motion: MotionSettings::default(),
         status: None,
     };
 
@@ -91,9 +97,18 @@ async fn create_camera(
 #[derive(Deserialize)]
 struct UpdateRecordingRequest {
     enabled: bool,
+    #[serde(default)]
+    trigger: RecordingTrigger,
     segment_seconds: u32,
     retention_max_age_secs: Option<u64>,
     retention_max_size_bytes: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct UpdateMotionRequest {
+    enabled: bool,
+    sensitivity: u8,
+    webhook_url: Option<String>,
 }
 
 /// All fields optional (PATCH semantics): only provided fields are
@@ -110,6 +125,7 @@ struct UpdateCameraRequest {
     height: Option<u32>,
     framerate: Option<u32>,
     recording: Option<UpdateRecordingRequest>,
+    motion: Option<UpdateMotionRequest>,
 }
 
 async fn update_camera(
@@ -165,9 +181,27 @@ async fn update_camera(
         .map_err(bad_request)?;
         camera.recording = RecordingSettings {
             enabled: rec.enabled,
+            trigger: rec.trigger,
             segment_seconds: rec.segment_seconds,
             retention_max_age_secs: rec.retention_max_age_secs,
             retention_max_size_bytes: rec.retention_max_size_bytes,
+        };
+    }
+
+    if let Some(motion) = req.motion {
+        validate::validate_sensitivity(motion.sensitivity).map_err(bad_request)?;
+        if let Some(url) = &motion.webhook_url {
+            if !url.trim().is_empty() {
+                validate::validate_webhook_url(url).map_err(bad_request)?;
+            }
+        }
+        camera.motion = MotionSettings {
+            enabled: motion.enabled,
+            sensitivity: motion.sensitivity,
+            webhook_url: motion
+                .webhook_url
+                .filter(|u| !u.trim().is_empty())
+                .map(|u| u.trim().to_string()),
         };
     }
 
@@ -182,7 +216,7 @@ async fn update_camera(
         .restart_if_running(&camera)
         .await
         .map_err(internal_error)?;
-    if camera.recording.enabled {
+    if camera.recording.enabled || camera.motion.enabled {
         state
             .supervisor
             .ensure_running(&camera)
@@ -191,6 +225,32 @@ async fn update_camera(
     }
 
     Ok(Json(camera))
+}
+
+#[derive(Serialize)]
+struct MotionStatus {
+    active: bool,
+}
+
+async fn get_motion_status(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Json<MotionStatus> {
+    Json(MotionStatus {
+        active: state.supervisor.motion_active(id).await,
+    })
+}
+
+async fn list_events(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<MotionEvent>>, ApiError> {
+    let events = state
+        .db
+        .list_motion_events(id, 100)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(events))
 }
 
 async fn delete_camera(

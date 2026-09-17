@@ -7,5 +7,8 @@ pub mod camera;
 pub mod config;
 pub mod validate;
 
-pub use camera::{Camera, CameraKind, CameraStatus, RecordingSettings, StreamCodec};
+pub use camera::{
+    Camera, CameraKind, CameraStatus, MotionEvent, MotionSettings, RecordingSettings,
+    RecordingTrigger, StreamCodec,
+};
 pub use config::AppConfig;

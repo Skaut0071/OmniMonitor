@@ -33,16 +33,32 @@ pub enum CameraStatus {
     Error,
 }
 
+/// What gates whether the recording branch actually writes video.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingTrigger {
+    /// Always recording while enabled - the "forever loop" default.
+    #[default]
+    Continuous,
+    /// Only recording while motion is detected (implies motion detection
+    /// runs for this camera regardless of `MotionSettings::enabled`).
+    Motion,
+}
+
 /// Continuous loop-recording settings for one camera. When `enabled`, the
 /// capture pipeline gains a second branch (GStreamer `splitmuxsink`) that
-/// writes fixed-length segment files to disk indefinitely; a background
-/// reaper (`omni-server::retention`) deletes the oldest segments once
+/// writes fixed-length segment files to disk indefinitely (or only while
+/// motion is active, if `trigger` is `Motion` - gated by a GStreamer
+/// `valve` toggled live, no pipeline restart needed); a background reaper
+/// (`omni-server::retention`) deletes the oldest segments once
 /// `retention_max_age_secs` and/or `retention_max_size_bytes` is exceeded -
 /// "forever loop" recording bounded by age and/or total size, whichever
 /// limit is hit first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordingSettings {
     pub enabled: bool,
+    #[serde(default)]
+    pub trigger: RecordingTrigger,
     /// Length of each recorded segment file, in seconds.
     pub segment_seconds: u32,
     /// Delete segments older than this many seconds. `None` = no age limit.
@@ -56,9 +72,33 @@ impl Default for RecordingSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            trigger: RecordingTrigger::Continuous,
             segment_seconds: 300,
             retention_max_age_secs: None,
             retention_max_size_bytes: None,
+        }
+    }
+}
+
+/// Motion detection settings for one camera. Runs independently of
+/// recording - it can drive a webhook, a `Motion` recording trigger, or
+/// both, or neither (just logged events).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MotionSettings {
+    pub enabled: bool,
+    /// 1 (least sensitive - needs a large change) to 100 (most sensitive
+    /// - a small change triggers it).
+    pub sensitivity: u8,
+    /// POSTed a JSON body to on motion start. `None` = no webhook.
+    pub webhook_url: Option<String>,
+}
+
+impl Default for MotionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sensitivity: 50,
+            webhook_url: None,
         }
     }
 }
@@ -76,6 +116,8 @@ pub struct Camera {
     pub codec: StreamCodec,
     #[serde(default)]
     pub recording: RecordingSettings,
+    #[serde(default)]
+    pub motion: MotionSettings,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<CameraStatus>,
 }
@@ -94,7 +136,18 @@ impl Camera {
             framerate: 30,
             codec: StreamCodec::Vp8,
             recording: RecordingSettings::default(),
+            motion: MotionSettings::default(),
             status: None,
         }
     }
+}
+
+/// A logged motion-detection event for one camera. `ended_at` is `None`
+/// while motion is still ongoing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MotionEvent {
+    pub id: Uuid,
+    pub camera_id: Uuid,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
 }

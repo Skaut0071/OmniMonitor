@@ -1,4 +1,4 @@
-//! SQLite-backed storage for camera configuration.
+//! SQLite-backed storage for camera configuration and motion events.
 //!
 //! SQLite is intentionally chosen over a server database for a
 //! single-box NVR: zero ops, file-based (easy to back up alongside
@@ -6,7 +6,10 @@
 //! (camera config changes and event metadata, not frame data).
 
 use anyhow::Result;
-use omni_core::{Camera, CameraKind, RecordingSettings, StreamCodec};
+use omni_core::{
+    Camera, CameraKind, MotionEvent, MotionSettings, RecordingSettings, RecordingTrigger,
+    StreamCodec,
+};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::{FromRow, Row};
 use uuid::Uuid;
@@ -29,9 +32,13 @@ struct CameraRow {
     framerate: i64,
     codec: String,
     recording_enabled: bool,
+    recording_trigger: String,
     segment_seconds: i64,
     retention_max_age_secs: Option<i64>,
     retention_max_size_bytes: Option<i64>,
+    motion_enabled: bool,
+    motion_sensitivity: i64,
+    motion_webhook_url: Option<String>,
 }
 
 impl TryFrom<CameraRow> for Camera {
@@ -56,6 +63,11 @@ impl TryFrom<CameraRow> for Camera {
             "h264" => StreamCodec::H264,
             other => anyhow::bail!("unknown codec in db: {other}"),
         };
+        let trigger = match row.recording_trigger.as_str() {
+            "continuous" => RecordingTrigger::Continuous,
+            "motion" => RecordingTrigger::Motion,
+            other => anyhow::bail!("unknown recording trigger in db: {other}"),
+        };
         Ok(Camera {
             id: Uuid::parse_str(&row.id)?,
             name: row.name,
@@ -67,11 +79,38 @@ impl TryFrom<CameraRow> for Camera {
             codec,
             recording: RecordingSettings {
                 enabled: row.recording_enabled,
+                trigger,
                 segment_seconds: row.segment_seconds as u32,
                 retention_max_age_secs: row.retention_max_age_secs.map(|v| v as u64),
                 retention_max_size_bytes: row.retention_max_size_bytes.map(|v| v as u64),
             },
+            motion: MotionSettings {
+                enabled: row.motion_enabled,
+                sensitivity: row.motion_sensitivity as u8,
+                webhook_url: row.motion_webhook_url,
+            },
             status: None,
+        })
+    }
+}
+
+#[derive(FromRow)]
+struct EventRow {
+    id: String,
+    camera_id: String,
+    started_at: chrono::DateTime<chrono::Utc>,
+    ended_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl TryFrom<EventRow> for MotionEvent {
+    type Error = anyhow::Error;
+
+    fn try_from(row: EventRow) -> Result<Self> {
+        Ok(MotionEvent {
+            id: Uuid::parse_str(&row.id)?,
+            camera_id: Uuid::parse_str(&row.camera_id)?,
+            started_at: row.started_at,
+            ended_at: row.ended_at,
         })
     }
 }
@@ -109,16 +148,38 @@ impl Db {
         .execute(&self.pool)
         .await?;
 
-        // Added in v0.2 (recording support). SQLite has no "ADD COLUMN IF
-        // NOT EXISTS", so on a v0.1 database each ALTER TABLE below fails
-        // with "duplicate column name" the first time it's re-run against
-        // an already-migrated v0.2+ database - that specific error is
-        // expected and ignored; anything else is a real failure.
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS motion_events (
+                id          TEXT PRIMARY KEY,
+                camera_id   TEXT NOT NULL,
+                started_at  TEXT NOT NULL,
+                ended_at    TEXT
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS motion_events_camera_idx ON motion_events(camera_id, started_at)")
+            .execute(&self.pool)
+            .await?;
+
+        // SQLite has no "ADD COLUMN IF NOT EXISTS", so each ALTER TABLE
+        // below fails with "duplicate column name" once it's already been
+        // applied to a given database file - that specific error is
+        // expected and ignored on every run after the first; anything
+        // else is a real failure.
         for stmt in [
+            // v0.2: recording support.
             "ALTER TABLE cameras ADD COLUMN recording_enabled INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE cameras ADD COLUMN segment_seconds INTEGER NOT NULL DEFAULT 300",
             "ALTER TABLE cameras ADD COLUMN retention_max_age_secs INTEGER",
             "ALTER TABLE cameras ADD COLUMN retention_max_size_bytes INTEGER",
+            // v0.3: motion detection + motion-triggered recording.
+            "ALTER TABLE cameras ADD COLUMN recording_trigger TEXT NOT NULL DEFAULT 'continuous'",
+            "ALTER TABLE cameras ADD COLUMN motion_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE cameras ADD COLUMN motion_sensitivity INTEGER NOT NULL DEFAULT 50",
+            "ALTER TABLE cameras ADD COLUMN motion_webhook_url TEXT",
         ] {
             if let Err(err) = sqlx::query(stmt).execute(&self.pool).await {
                 let msg = err.to_string();
@@ -155,13 +216,19 @@ impl Db {
             StreamCodec::Vp8 => "vp8",
             StreamCodec::H264 => "h264",
         };
+        let trigger = match camera.recording.trigger {
+            RecordingTrigger::Continuous => "continuous",
+            RecordingTrigger::Motion => "motion",
+        };
         sqlx::query(
             r#"
             INSERT INTO cameras (
                 id, name, kind, device_path, rtsp_url, enabled, width, height, framerate, codec,
-                recording_enabled, segment_seconds, retention_max_age_secs, retention_max_size_bytes
+                recording_enabled, recording_trigger, segment_seconds,
+                retention_max_age_secs, retention_max_size_bytes,
+                motion_enabled, motion_sensitivity, motion_webhook_url
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 kind = excluded.kind,
@@ -173,9 +240,13 @@ impl Db {
                 framerate = excluded.framerate,
                 codec = excluded.codec,
                 recording_enabled = excluded.recording_enabled,
+                recording_trigger = excluded.recording_trigger,
                 segment_seconds = excluded.segment_seconds,
                 retention_max_age_secs = excluded.retention_max_age_secs,
-                retention_max_size_bytes = excluded.retention_max_size_bytes
+                retention_max_size_bytes = excluded.retention_max_size_bytes,
+                motion_enabled = excluded.motion_enabled,
+                motion_sensitivity = excluded.motion_sensitivity,
+                motion_webhook_url = excluded.motion_webhook_url
             "#,
         )
         .bind(camera.id.to_string())
@@ -189,9 +260,13 @@ impl Db {
         .bind(camera.framerate as i64)
         .bind(codec)
         .bind(camera.recording.enabled)
+        .bind(trigger)
         .bind(camera.recording.segment_seconds as i64)
         .bind(camera.recording.retention_max_age_secs.map(|v| v as i64))
         .bind(camera.recording.retention_max_size_bytes.map(|v| v as i64))
+        .bind(camera.motion.enabled)
+        .bind(camera.motion.sensitivity as i64)
+        .bind(&camera.motion.webhook_url)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -199,6 +274,10 @@ impl Db {
 
     pub async fn delete_camera(&self, id: Uuid) -> Result<()> {
         sqlx::query("DELETE FROM cameras WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM motion_events WHERE camera_id = ?")
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
@@ -215,5 +294,50 @@ impl Db {
             .await?;
         let count: i64 = row.try_get("c")?;
         Ok(count > 0)
+    }
+
+    /// Opens a new motion event for a camera (motion just started).
+    pub async fn open_motion_event(&self, camera_id: Uuid) -> Result<MotionEvent> {
+        let event = MotionEvent {
+            id: Uuid::new_v4(),
+            camera_id,
+            started_at: chrono::Utc::now(),
+            ended_at: None,
+        };
+        sqlx::query("INSERT INTO motion_events (id, camera_id, started_at) VALUES (?, ?, ?)")
+            .bind(event.id.to_string())
+            .bind(event.camera_id.to_string())
+            .bind(event.started_at)
+            .execute(&self.pool)
+            .await?;
+        Ok(event)
+    }
+
+    /// Closes a specific motion event by id (motion just ended). Callers
+    /// must track the id `open_motion_event` gave them and close that
+    /// exact event - not "whatever's latest for this camera": a settings
+    /// change can start a *second* pipeline (and motion watcher) for the
+    /// same camera before the old one's shutdown code runs, and a
+    /// latest-open-event lookup would then race and close the new
+    /// pipeline's event instead of the old, truly orphaned one. Caught by
+    /// testing a settings-change restart while motion was active.
+    pub async fn close_motion_event(&self, event_id: Uuid) -> Result<()> {
+        sqlx::query("UPDATE motion_events SET ended_at = ? WHERE id = ? AND ended_at IS NULL")
+            .bind(chrono::Utc::now())
+            .bind(event_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_motion_events(&self, camera_id: Uuid, limit: i64) -> Result<Vec<MotionEvent>> {
+        let rows = sqlx::query_as::<_, EventRow>(
+            "SELECT * FROM motion_events WHERE camera_id = ? ORDER BY started_at DESC LIMIT ?",
+        )
+        .bind(camera_id.to_string())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(MotionEvent::try_from).collect()
     }
 }

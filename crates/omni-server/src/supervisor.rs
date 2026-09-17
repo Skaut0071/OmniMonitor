@@ -8,10 +8,12 @@
 //! subscribes to its broadcast channel instead of starting their own.
 //!
 //! Lifecycle:
-//! - A camera with recording enabled gets a persistent pipeline, started
-//!   at server boot and kept running regardless of viewers.
-//! - A camera being watched but not recorded gets an ephemeral pipeline:
-//!   started on the first viewer, stopped when the last one disconnects.
+//! - A camera with recording (continuous) or standalone motion detection
+//!   enabled gets a persistent pipeline, started at server boot and kept
+//!   running regardless of viewers.
+//! - A camera being watched but not recorded/detected gets an ephemeral
+//!   pipeline: started on the first viewer, stopped when the last one
+//!   disconnects.
 //! - Changing a camera's settings (recording on/off, resolution, ...)
 //!   restarts its pipeline immediately so the change actually takes
 //!   effect - see `restart_if_running`. Active viewers of that camera are
@@ -20,42 +22,63 @@
 //!   Applying settings changes without dropping active viewers is future
 //!   work (see docs/ROADMAP.md) - it would need dynamic `tee` pad
 //!   add/remove instead of a full pipeline restart.
+//! - `RecordingTrigger::Motion` ("only record while motion is detected")
+//!   works the same way: every motion start/stop rebuilds the pipeline
+//!   with the recording branch added or removed (see `replace_pipeline`
+//!   and `spawn_motion_recording_watcher`), reusing the exact same
+//!   restart machinery as a settings change - so it carries the same
+//!   "active viewers get disconnected" caveat, on every motion
+//!   transition, not just on an explicit settings change. A GStreamer
+//!   `valve` toggled live was tried first and abandoned - see the long
+//!   comment on `omni_capture::RecordingSink` for why.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use omni_capture::{
-    CaptureError, CaptureHandle, CaptureSession, CaptureSource, EncodedFrame, PipelineConfig,
-    RecordingSink,
+    CaptureError, CaptureHandle, CaptureSession, CaptureSource, EncodedFrame, MotionConfig,
+    PipelineConfig, RecordingSink,
 };
-use omni_core::{Camera, CameraKind};
+use omni_core::{Camera, CameraKind, RecordingTrigger};
+use omni_db::Db;
 use tokio::sync::{broadcast, watch, RwLock};
 use uuid::Uuid;
+
+use crate::motion;
 
 const DEFAULT_BITRATE: u32 = 2_000_000;
 
 struct ManagedCamera {
     session: CaptureSession,
     capture_error: watch::Receiver<Option<String>>,
+    motion: Option<watch::Receiver<bool>>,
     /// Sent `true` when this instance is replaced (settings restart) or
     /// explicitly stopped, so viewers holding a clone can tell the
     /// difference from a plain capture failure if they ever need to.
     superseded: watch::Sender<bool>,
     viewers: AtomicUsize,
-    recording: AtomicBool,
+    /// Whether this specific pipeline instance should keep running with
+    /// no viewers (continuous recording or standalone motion detection).
+    /// For `RecordingTrigger::Motion`, this is true whenever recording is
+    /// enabled at all - motion detection itself must keep running
+    /// regardless of viewers so it can notice the *next* transition,
+    /// even while currently not actively recording.
+    keep_alive: AtomicBool,
 }
 
 pub struct Supervisor {
     data_dir: PathBuf,
+    db: Db,
     cameras: RwLock<HashMap<Uuid, Arc<ManagedCamera>>>,
 }
 
 /// Held by a live-view WebSocket handler for as long as it's watching a
 /// camera. Dropping it releases this viewer's slot; if it was the last
-/// one and the camera isn't being recorded, the pipeline is torn down
-/// (e.g. releasing a USB device) shortly after.
+/// one and the camera doesn't need to keep running on its own, the
+/// pipeline is torn down (e.g. releasing a USB device) shortly after.
 pub struct ViewerGuard {
     camera_id: Uuid,
     managed: Arc<ManagedCamera>,
@@ -65,7 +88,7 @@ pub struct ViewerGuard {
 impl Drop for ViewerGuard {
     fn drop(&mut self) {
         let prev = self.managed.viewers.fetch_sub(1, Ordering::SeqCst);
-        if prev == 1 && !self.managed.recording.load(Ordering::SeqCst) {
+        if prev == 1 && !self.managed.keep_alive.load(Ordering::SeqCst) {
             let supervisor = Arc::clone(&self.supervisor);
             let camera_id = self.camera_id;
             let managed = Arc::clone(&self.managed);
@@ -87,9 +110,10 @@ pub struct ViewerHandle {
 }
 
 impl Supervisor {
-    pub fn new(data_dir: PathBuf) -> Self {
+    pub fn new(data_dir: PathBuf, db: Db) -> Self {
         Self {
             data_dir,
+            db,
             cameras: RwLock::new(HashMap::new()),
         }
     }
@@ -98,17 +122,40 @@ impl Supervisor {
         self.data_dir.join("recordings").join(camera_id.to_string())
     }
 
-    fn pipeline_config(&self, camera: &Camera) -> PipelineConfig {
+    /// Whether motion is considered active right now for a camera, per
+    /// its currently-running pipeline (if any - a camera with no pipeline
+    /// running has no opinion, reported as inactive).
+    pub async fn motion_active(&self, camera_id: Uuid) -> bool {
+        self.cameras
+            .read()
+            .await
+            .get(&camera_id)
+            .and_then(|m| m.motion.as_ref())
+            .map(|rx| *rx.borrow())
+            .unwrap_or(false)
+    }
+
+    fn pipeline_config(&self, camera: &Camera, motion_active_now: bool) -> PipelineConfig {
         let source = match &camera.kind {
             CameraKind::Usb { device_path } => CaptureSource::Usb {
                 device_path: device_path.clone(),
             },
             CameraKind::Rtsp { url } => CaptureSource::Rtsp { url: url.clone() },
         };
-        let recording = camera.recording.enabled.then(|| RecordingSink {
+        let need_motion =
+            camera.motion.enabled || camera.recording.trigger == RecordingTrigger::Motion;
+        let recording_now = camera.recording.enabled
+            && (camera.recording.trigger == RecordingTrigger::Continuous || motion_active_now);
+
+        let recording = recording_now.then(|| RecordingSink {
             dir: self.recordings_dir(camera.id),
             segment_seconds: camera.recording.segment_seconds,
         });
+        let motion = need_motion.then_some(MotionConfig {
+            sensitivity: camera.motion.sensitivity,
+            initial_active: motion_active_now,
+        });
+
         PipelineConfig {
             source,
             width: camera.width,
@@ -116,19 +163,44 @@ impl Supervisor {
             framerate: camera.framerate,
             bitrate: DEFAULT_BITRATE,
             recording,
+            motion,
         }
     }
 
-    fn spawn_managed(&self, camera: &Camera) -> Result<Arc<ManagedCamera>, CaptureError> {
-        let config = self.pipeline_config(camera);
-        let CaptureHandle { session, error } = CaptureSession::start(config)?;
+    fn keeps_pipeline_alive(camera: &Camera) -> bool {
+        camera.motion.enabled || camera.recording.enabled
+    }
+
+    fn spawn_managed(
+        self: &Arc<Self>,
+        camera: &Camera,
+        motion_active_now: bool,
+    ) -> Result<Arc<ManagedCamera>, CaptureError> {
+        let config = self.pipeline_config(camera, motion_active_now);
+        let CaptureHandle {
+            session,
+            error,
+            motion,
+        } = CaptureSession::start(config)?;
+        tracing::debug!(camera = %camera.id, motion_present = motion.is_some(), motion_active_now, "capture session started");
+        if let Some(motion_rx) = &motion {
+            motion::spawn_watcher(self.db.clone(), camera, motion_rx.clone());
+            if camera.recording.enabled && camera.recording.trigger == RecordingTrigger::Motion {
+                spawn_motion_recording_watcher(
+                    Arc::clone(self),
+                    camera.clone(),
+                    motion_rx.clone(),
+                );
+            }
+        }
         let (superseded_tx, _) = watch::channel(false);
         Ok(Arc::new(ManagedCamera {
             session,
             capture_error: error,
+            motion,
             superseded: superseded_tx,
             viewers: AtomicUsize::new(0),
-            recording: AtomicBool::new(camera.recording.enabled),
+            keep_alive: AtomicBool::new(Self::keeps_pipeline_alive(camera)),
         }))
     }
 
@@ -143,7 +215,7 @@ impl Supervisor {
         let managed = if let Some(existing) = map.get(&camera.id) {
             Arc::clone(existing)
         } else {
-            let managed = self.spawn_managed(camera)?;
+            let managed = self.spawn_managed(camera, false)?;
             map.insert(camera.id, Arc::clone(&managed));
             managed
         };
@@ -164,13 +236,14 @@ impl Supervisor {
         })
     }
 
-    /// Starts a persistent pipeline for a recording-enabled camera if one
-    /// isn't already running. Called at boot for every such camera, and
-    /// whenever recording is turned on via the API.
-    pub async fn ensure_running(&self, camera: &Camera) -> Result<(), CaptureError> {
+    /// Starts a persistent pipeline for a camera that needs to keep
+    /// running on its own (recording and/or standalone motion detection)
+    /// if one isn't already running. Called at boot for every such
+    /// camera, and whenever recording/motion is turned on via the API.
+    pub async fn ensure_running(self: &Arc<Self>, camera: &Camera) -> Result<(), CaptureError> {
         let mut map = self.cameras.write().await;
         if let std::collections::hash_map::Entry::Vacant(entry) = map.entry(camera.id) {
-            let managed = self.spawn_managed(camera)?;
+            let managed = self.spawn_managed(camera, false)?;
             entry.insert(managed);
         }
         Ok(())
@@ -180,7 +253,18 @@ impl Supervisor {
     /// running, so a settings change (recording toggle, resolution, ...)
     /// actually takes effect right away. No-op if nothing is running for
     /// this camera - the next viewer/recording start will just pick up
-    /// the new settings naturally.
+    /// the new settings naturally. Preserves the current motion-active
+    /// state (if any) across the restart, so an in-progress
+    /// motion-triggered recording isn't interrupted by an unrelated
+    /// settings tweak.
+    pub async fn restart_if_running(self: &Arc<Self>, camera: &Camera) -> Result<(), CaptureError> {
+        let motion_active = self.motion_active(camera.id).await;
+        self.replace_pipeline(camera, motion_active).await
+    }
+
+    /// Replaces `camera`'s running pipeline with a freshly built one
+    /// reflecting `motion_active_now`, if a pipeline is currently
+    /// running for it. No-op otherwise.
     ///
     /// The old pipeline is stopped *before* the new one starts, and given
     /// a brief moment to settle. This matters specifically for USB
@@ -189,16 +273,20 @@ impl Supervisor {
     /// fails with "device busy" (this was caught by testing a real
     /// settings-change restart against real hardware, not reasoned out
     /// up front).
-    pub async fn restart_if_running(&self, camera: &Camera) -> Result<(), CaptureError> {
+    async fn replace_pipeline(
+        self: &Arc<Self>,
+        camera: &Camera,
+        motion_active_now: bool,
+    ) -> Result<(), CaptureError> {
         let mut map = self.cameras.write().await;
         let Some(old) = map.get(&camera.id).cloned() else {
             return Ok(());
         };
         old.session.stop();
         let _ = old.superseded.send(true);
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let new_managed = self.spawn_managed(camera)?;
+        let new_managed = self.spawn_managed(camera, motion_active_now)?;
         map.insert(camera.id, new_managed);
         Ok(())
     }
@@ -218,6 +306,37 @@ impl Supervisor {
             map.remove(&camera_id);
         }
     }
+}
+
+/// Watches a camera's motion signal for as long as its owning pipeline
+/// lives, and rebuilds that pipeline (adding or removing the recording
+/// branch) on every transition - see the module docs for why a full
+/// rebuild, not a live-toggled element.
+fn spawn_motion_recording_watcher(
+    supervisor: Arc<Supervisor>,
+    camera: Camera,
+    mut motion: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        loop {
+            if motion.changed().await.is_err() {
+                return;
+            }
+            let active = *motion.borrow();
+            tracing::info!(camera = %camera.id, active, "motion transition: rebuilding pipeline for motion-triggered recording");
+            if let Err(err) = supervisor.replace_pipeline(&camera, active).await {
+                tracing::error!(camera = %camera.id, %err, "failed to rebuild pipeline for motion-triggered recording");
+                return;
+            }
+            // `replace_pipeline` just superseded the pipeline this very
+            // `motion` receiver belongs to, which will make the next
+            // `changed()` call return an error shortly (its sender is
+            // dropped once the old pipeline is torn down) - the *new*
+            // pipeline's own watcher (spawned by `spawn_managed` for it)
+            // takes over from here, so returning then is correct, not a
+            // missed transition.
+        }
+    });
 }
 
 /// Merges "the capture pipeline hit a bus error" and "this pipeline

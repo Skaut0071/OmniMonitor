@@ -5,10 +5,11 @@ for a Ubiquiti-Protect-style dashboard UI/UX with **USB webcams treated as
 first-class cameras** - plug in a UVC camera over USB and it gets the same
 live-preview and recording pipeline a network/RTSP camera would.
 
-Status: **early (v0.2)**. Live preview over WebRTC and continuous
-segmented recording with retention both work end-to-end for USB *and*
-RTSP cameras (most WiFi/PoE IP cameras speak RTSP - that's the protocol
-this targets for network cameras). No authentication yet - see
+Status: **early (v0.3)**. Live preview over WebRTC, continuous or
+motion-triggered segmented recording with retention, and motion detection
+with webhook alerts all work end-to-end for USB *and* RTSP cameras (most
+WiFi/PoE IP cameras speak RTSP - that's the protocol this targets for
+network cameras). No authentication yet - see
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how it's built and why.
 
@@ -61,9 +62,11 @@ in after starting the server, click "Rescan USB cameras" in the sidebar (or
 `POST /api/cameras/discover`). Add a network camera with "+ Add camera"
 and its RTSP URL (e.g. `rtsp://192.168.1.50:554/stream1` - check your
 camera's manual for the exact path; most WiFi/PoE IP cameras speak RTSP).
-Click the gear icon on a camera tile to turn on continuous recording and
-set a retention limit (max age and/or max total size); click the record
-icon to browse and play back its recordings.
+Click the gear icon on a camera tile to turn on recording (continuous, or
+only while motion is detected) and set a retention limit (max age and/or
+max total size), and to turn on motion detection/webhook alerts
+independently of recording. Click the record icon to browse/play back
+recordings and view the motion event log.
 
 ### Development loop
 
@@ -90,6 +93,8 @@ cd frontend && npm install && npm run dev
 | GET    | `/api/cameras/:id/recordings`        | List a camera's recorded segments.        |
 | GET    | `/api/recordings/:id/:filename`      | Download/stream a segment (Range-request/seekable). |
 | DELETE | `/api/recordings/:id/:filename`      | Delete a segment.                         |
+| GET    | `/api/cameras/:id/motion`            | `{"active": bool}` - is motion currently detected. |
+| GET    | `/api/cameras/:id/events`            | List recent motion events (start/end time). |
 
 ## Why no HTTPS by default?
 
