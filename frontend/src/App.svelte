@@ -4,11 +4,17 @@
   import AddCameraModal from "./lib/AddCameraModal.svelte";
   import CameraSettingsModal from "./lib/CameraSettingsModal.svelte";
   import RecordingsModal from "./lib/RecordingsModal.svelte";
-  import { listCameras, discoverCameras, deleteCamera, type Camera } from "./lib/api";
+  import Login from "./lib/Login.svelte";
+  import ChangePasswordModal from "./lib/ChangePasswordModal.svelte";
+  import { listCameras, discoverCameras, deleteCamera, me, logout, type Camera } from "./lib/api";
+
+  let authChecked = false;
+  let username: string | null = null;
 
   let cameras: Camera[] = [];
   let loading = true;
   let showAddModal = false;
+  let showChangePassword = false;
   let loadError = "";
   let settingsCamera: Camera | null = null;
   let recordingsCamera: Camera | null = null;
@@ -37,72 +43,104 @@
     await refresh();
   }
 
-  onMount(refresh);
+  async function checkAuth() {
+    const session = await me();
+    username = session?.username ?? null;
+    authChecked = true;
+    if (username) refresh();
+  }
+
+  async function onLoggedIn() {
+    await checkAuth();
+  }
+
+  async function signOut() {
+    await logout();
+    username = null;
+    cameras = [];
+  }
+
+  onMount(checkAuth);
 </script>
 
-<div class="layout">
-  <aside class="sidebar">
-    <div class="brand">
-      <span class="brand-mark">●</span>
-      <span class="brand-name">OmniMonitor</span>
-    </div>
-    <nav>
-      <a class="active" href="#/">Dashboard</a>
-    </nav>
-    <div class="sidebar-footer">
-      <button class="ghost" on:click={runDiscover}>Rescan USB cameras</button>
-      <button class="primary" on:click={() => (showAddModal = true)}>+ Add camera</button>
-    </div>
-  </aside>
-
-  <main>
-    <header>
-      <h1>Cameras</h1>
-      <span class="count">{cameras.length} camera{cameras.length === 1 ? "" : "s"}</span>
-    </header>
-
-    {#if loading}
-      <p class="hint">Loading…</p>
-    {:else if loadError}
-      <p class="error">{loadError}</p>
-    {:else if cameras.length === 0}
-      <div class="empty">
-        <p>No cameras yet.</p>
-        <p class="hint">
-          Plug in a USB camera and click "Rescan USB cameras", or add an RTSP camera.
-        </p>
+{#if !authChecked}
+  <div class="boot-hint">Loading…</div>
+{:else if !username}
+  <Login on:loggedIn={onLoggedIn} />
+{:else}
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">●</span>
+        <span class="brand-name">OmniMonitor</span>
       </div>
-    {:else}
-      <div class="grid">
-        {#each cameras as camera (camera.id)}
-          <div class="grid-item">
-            <CameraTile
-              {camera}
-              on:remove={() => remove(camera.id)}
-              on:settings={() => (settingsCamera = camera)}
-              on:recordings={() => (recordingsCamera = camera)}
-            />
-          </div>
-        {/each}
+      <nav>
+        <a class="active" href="#/">Dashboard</a>
+      </nav>
+      <div class="sidebar-footer">
+        <button class="ghost" on:click={runDiscover}>Rescan USB cameras</button>
+        <button class="primary" on:click={() => (showAddModal = true)}>+ Add camera</button>
+        <div class="account">
+          <span class="username">{username}</span>
+          <button class="link" on:click={() => (showChangePassword = true)}>Change password</button>
+          <button class="link" on:click={signOut}>Sign out</button>
+        </div>
       </div>
-    {/if}
-  </main>
-</div>
+    </aside>
 
-{#if showAddModal}
-  <AddCameraModal on:close={() => (showAddModal = false)} on:created={refresh} />
-{/if}
+    <main>
+      <header>
+        <h1>Cameras</h1>
+        <span class="count">{cameras.length} camera{cameras.length === 1 ? "" : "s"}</span>
+      </header>
 
-{#if settingsCamera}
-  <CameraSettingsModal
-    camera={settingsCamera}
-    on:close={() => (settingsCamera = null)}
-    on:updated={refresh}
-  />
-{/if}
+      {#if loading}
+        <p class="hint">Loading…</p>
+      {:else if loadError}
+        <p class="error">{loadError}</p>
+      {:else if cameras.length === 0}
+        <div class="empty">
+          <p>No cameras yet.</p>
+          <p class="hint">
+            Plug in a USB camera and click "Rescan USB cameras", or add an RTSP camera.
+          </p>
+        </div>
+      {:else}
+        <div class="grid">
+          {#each cameras as camera (camera.id)}
+            <div class="grid-item">
+              <CameraTile
+                {camera}
+                on:remove={() => remove(camera.id)}
+                on:settings={() => (settingsCamera = camera)}
+                on:recordings={() => (recordingsCamera = camera)}
+              />
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </main>
+  </div>
 
-{#if recordingsCamera}
-  <RecordingsModal camera={recordingsCamera} on:close={() => (recordingsCamera = null)} />
+  {#if showAddModal}
+    <AddCameraModal on:close={() => (showAddModal = false)} on:created={refresh} />
+  {/if}
+
+  {#if settingsCamera}
+    <CameraSettingsModal
+      camera={settingsCamera}
+      on:close={() => (settingsCamera = null)}
+      on:updated={refresh}
+    />
+  {/if}
+
+  {#if recordingsCamera}
+    <RecordingsModal camera={recordingsCamera} on:close={() => (recordingsCamera = null)} />
+  {/if}
+
+  {#if showChangePassword}
+    <ChangePasswordModal on:close={() => (showChangePassword = false)} />
+  {/if}
 {/if}
 
 <style>
@@ -151,6 +189,39 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+  }
+  .boot-hint {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: 0.9rem;
+  }
+  .account {
+    margin-top: 1rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .username {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-bottom: 0.2rem;
+  }
+  .link {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    text-align: left;
+    padding: 0.2rem 0;
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+  .link:hover {
+    color: var(--text);
   }
   main {
     flex: 1;

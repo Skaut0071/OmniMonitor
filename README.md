@@ -5,11 +5,11 @@ for a Ubiquiti-Protect-style dashboard UI/UX with **USB webcams treated as
 first-class cameras** - plug in a UVC camera over USB and it gets the same
 live-preview and recording pipeline a network/RTSP camera would.
 
-Status: **early (v0.3)**. Live preview over WebRTC, continuous or
-motion-triggered segmented recording with retention, and motion detection
-with webhook alerts all work end-to-end for USB *and* RTSP cameras (most
-WiFi/PoE IP cameras speak RTSP - that's the protocol this targets for
-network cameras). No authentication yet - see
+Status: **early (v0.4)**. Live preview over WebRTC, continuous or
+motion-triggered segmented recording with retention, motion detection
+with webhook alerts, and single-account login all work end-to-end for
+USB *and* RTSP cameras (most WiFi/PoE IP cameras speak RTSP - that's the
+protocol this targets for network cameras). See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how it's built and why.
 
@@ -56,9 +56,20 @@ and the release backend binary.
 OMNI_FRONTEND_DIST=$(pwd)/frontend/dist ./target/release/omni-server
 ```
 
-Then open `http://<host>:8090/` in a browser. Any USB camera visible to
-the OS (e.g. `/dev/video0`) is auto-discovered on startup - if you plug one
-in after starting the server, click "Rescan USB cameras" in the sidebar (or
+Then open `http://<host>:8090/` in a browser. On first boot, check the
+server's log output for a line like:
+
+```
+No admin account existed - created one. Username: admin  Password: <random>
+```
+
+That's printed exactly once - log in with it and change it from the
+sidebar ("Change password"), or set `OMNI_ADMIN_PASSWORD` in the
+environment before the very first run to pick your own instead.
+
+Any USB camera visible to the OS (e.g. `/dev/video0`) is auto-discovered
+on startup - if you plug one in after starting the server, click "Rescan
+USB cameras" in the sidebar (or
 `POST /api/cameras/discover`). Add a network camera with "+ Add camera"
 and its RTSP URL (e.g. `rtsp://192.168.1.50:554/stream1` - check your
 camera's manual for the exact path; most WiFi/PoE IP cameras speak RTSP).
@@ -95,13 +106,21 @@ cd frontend && npm install && npm run dev
 | DELETE | `/api/recordings/:id/:filename`      | Delete a segment.                         |
 | GET    | `/api/cameras/:id/motion`            | `{"active": bool}` - is motion currently detected. |
 | GET    | `/api/cameras/:id/events`            | List recent motion events (start/end time). |
+| POST   | `/api/auth/login`                    | `{username, password}` - the only endpoint reachable without a session. |
+| POST   | `/api/auth/logout`                   | Clear the current session.                |
+| GET    | `/api/auth/me`                       | `{"username": ...}` if logged in, 401 otherwise. |
+| POST   | `/api/auth/change-password`          | `{current_password, new_password}`.       |
+
+Every endpoint above `/api/auth/login` requires a valid session cookie
+(set by logging in) - see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#authentication).
 
 ## Why no HTTPS by default?
 
 Deliberate choice for early versions: the server speaks plain HTTP on
 8090. If you need TLS, put a reverse proxy in front of it or use your own
-port-forwarding/tunnel setup. There's also no authentication yet (see
-roadmap) - don't expose this to the open internet as-is.
+port-forwarding/tunnel setup. There's now a login (see above), but it's
+still a single account with no rate limiting - don't expose this to the
+open internet as-is.
 
 ## License
 

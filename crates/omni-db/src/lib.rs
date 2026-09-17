@@ -164,6 +164,33 @@ impl Db {
             .execute(&self.pool)
             .await?;
 
+        // Singleton row (id always 1) - see `Db::admin_user`. There is
+        // exactly one account for v0.4; see docs/ROADMAP.md for
+        // multi-user as future work.
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS admin_user (
+                id             INTEGER PRIMARY KEY CHECK (id = 1),
+                username       TEXT NOT NULL,
+                password_hash  TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS sessions (
+                token       TEXT PRIMARY KEY,
+                created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at  TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         // SQLite has no "ADD COLUMN IF NOT EXISTS", so each ALTER TABLE
         // below fails with "duplicate column name" once it's already been
         // applied to a given database file - that specific error is
@@ -339,5 +366,70 @@ impl Db {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(MotionEvent::try_from).collect()
+    }
+
+    /// The single admin account, if one has been bootstrapped yet.
+    pub async fn admin_user(&self) -> Result<Option<(String, String)>> {
+        let row = sqlx::query("SELECT username, password_hash FROM admin_user WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(match row {
+            Some(row) => Some((row.try_get("username")?, row.try_get("password_hash")?)),
+            None => None,
+        })
+    }
+
+    /// Creates or overwrites the single admin account.
+    pub async fn set_admin_user(&self, username: &str, password_hash: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO admin_user (id, username, password_hash) VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET username = excluded.username, password_hash = excluded.password_hash
+            "#,
+        )
+        .bind(username)
+        .bind(password_hash)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn create_session(&self, token: &str, expires_at: chrono::DateTime<chrono::Utc>) -> Result<()> {
+        sqlx::query("INSERT INTO sessions (token, expires_at) VALUES (?, ?)")
+            .bind(token)
+            .bind(expires_at)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// True if `token` names a session that hasn't expired.
+    pub async fn session_valid(&self, token: &str) -> Result<bool> {
+        let row = sqlx::query("SELECT expires_at FROM sessions WHERE token = ?")
+            .bind(token)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else { return Ok(false) };
+        let expires_at: chrono::DateTime<chrono::Utc> = row.try_get("expires_at")?;
+        Ok(expires_at > chrono::Utc::now())
+    }
+
+    pub async fn delete_session(&self, token: &str) -> Result<()> {
+        sqlx::query("DELETE FROM sessions WHERE token = ?")
+            .bind(token)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Sweeps expired sessions - called periodically, not on every
+    /// request, since an expired-but-not-yet-swept token is already
+    /// correctly rejected by `session_valid`.
+    pub async fn delete_expired_sessions(&self) -> Result<()> {
+        sqlx::query("DELETE FROM sessions WHERE expires_at <= ?")
+            .bind(chrono::Utc::now())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 }

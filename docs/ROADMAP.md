@@ -65,10 +65,14 @@ order the project intends to tackle things.
 - [x] Frontend: motion sensitivity/webhook settings, a live "MOTION" tile
       badge (polled), and an events tab alongside the recordings browser.
 
-## v0.4 - multi-user & auth
+## v0.4 - auth - partially done
 
-- [ ] Authentication (sessions or tokens) - currently there is none.
-- [ ] Per-camera permissions.
+- [x] Authentication: single admin account, argon2-hashed password,
+      server-side session tokens in an `HttpOnly` cookie
+      (`omni-server::auth`). Bootstrapped on first boot via
+      `OMNI_ADMIN_PASSWORD` or a randomly generated password printed to
+      the log once. Change-password endpoint + UI.
+- [ ] Multi-user / per-camera permissions - still single-account only.
 - [ ] Still HTTP-first, but document a recommended reverse-proxy TLS setup.
 
 ## Later / unscheduled

@@ -10,7 +10,7 @@ pitch is two things combined:
    as full peers of network/RTSP cameras - the same live-preview and
    recording pipeline handles both.
 
-v0.3 targets Linux only, HTTP only (no TLS - see "HTTPS" below), single-box
+v0.4 targets Linux only, HTTP only (no TLS - see "HTTPS" below), single-box
 deployments. Default ports: **8090** for the web UI/API, **5544** for RTSP
 *server* (reserved for a future milestone - re-serving OmniMonitor's own
 streams over RTSP - not implemented yet; consuming a camera's RTSP stream
@@ -343,6 +343,37 @@ Trickle ICE isn't implemented yet - full-gathering-before-send adds a
 little latency (typically well under a second on a LAN) but is much
 simpler. Worth revisiting if cross-NAT latency becomes a real complaint.
 
+## Authentication
+
+Single admin account, session cookie, deliberately no more than that for
+now (see `docs/ROADMAP.md` for multi-user/per-camera permissions as
+future work). `omni-server::auth`:
+
+- On first boot, if no account exists, one is created - `admin` plus
+  `OMNI_ADMIN_PASSWORD` if that env var is set, otherwise a random
+  password printed to the log exactly once (the standard self-hosted-app
+  pattern: there's no sensible default password to ship, and prompting
+  interactively doesn't fit a service that's meant to just start).
+- Passwords are hashed with argon2 (`argon2` crate, default parameters).
+- A successful login gets an opaque random token (not a JWT - there's
+  nothing to encode beyond "this token is valid", so a signed/stateless
+  token would just be extra complexity) stored in a `sessions` table and
+  set as an `HttpOnly`, `SameSite=Lax` cookie. No `Secure` flag - this
+  server is HTTP-only by design (see below), and `Secure` would make the
+  cookie silently stop being sent at all over plain HTTP.
+- `axum::middleware::from_fn_with_state` (`auth::require_auth`) wraps
+  every `/api/*` route except `/api/auth/login` - see `routes::api_routes`
+  for how the router is split into a public and a protected half via
+  `route_layer`, which (unlike `.layer`) only wraps routes registered
+  before it in the same `Router`, not routes merged in afterward. The
+  static frontend files (`GET /`, JS/CSS/wasm) are deliberately **not**
+  gated, so the login screen itself can load; the API calls it makes are
+  what's actually protected.
+- Sessions last 30 days from creation (no sliding-window renewal) and are
+  swept lazily - an expired-but-not-yet-deleted token is already rejected
+  by the validity check on every request, the periodic sweep just
+  reclaims the row.
+
 ## HTTPS
 
 Deliberately out of scope for early versions, per project decision: the
@@ -352,11 +383,13 @@ own certificate termination. This keeps local/LAN setup friction-free,
 which matters more than TLS for a device that currently has no
 authentication either (see Roadmap).
 
-## Known limitations / honest gaps in v0.3
+## Known limitations / honest gaps in v0.4
 
-- **No authentication.** Anyone who can reach port 8090 can view,
-  reconfigure, and delete recordings for any camera. Do not expose this to
-  the open internet as-is.
+- **Single account, no rate limiting on login, no lockout after repeated
+  failures.** Anyone who can reach port 8090 can attempt to log in; a
+  successful session then has full access to view, reconfigure, and
+  delete recordings for every camera. Fine on a trusted LAN, not
+  something to expose to the open internet as-is.
 - **A settings change disconnects active viewers of that camera** (see
   "One shared pipeline per camera" above) rather than applying live -
   and for `RecordingTrigger::Motion` cameras, this now also happens on

@@ -15,12 +15,17 @@ use omni_core::{
     RecordingTrigger, StreamCodec,
 };
 
+use crate::auth;
 use crate::discovery::auto_discover_usb_cameras;
 use crate::state::AppState;
 use crate::ws::stream_ws_handler;
 
-pub fn api_routes() -> Router<Arc<AppState>> {
-    Router::new()
+/// `/api/auth/login` is the only endpoint reachable without a session;
+/// everything else requires one - applied via `route_layer` below, which
+/// (unlike `.layer`) only wraps routes added *before* it in this router,
+/// not the whole `Router` it later gets merged into.
+pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    let protected = Router::new()
         .route("/api/config", get(get_config))
         .route("/api/cameras", get(list_cameras).post(create_camera))
         .route("/api/cameras/discover", post(discover_cameras))
@@ -36,6 +41,103 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/cameras/:id/motion", get(get_motion_status))
         .route("/api/cameras/:id/events", get(list_events))
         .route("/api/stream/:camera_id", get(stream_ws_handler))
+        .route("/api/auth/me", get(auth_me))
+        .route("/api/auth/logout", post(auth_logout))
+        .route("/api/auth/change-password", post(auth_change_password))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state,
+            auth::require_auth,
+        ));
+
+    Router::new()
+        .route("/api/auth/login", post(auth_login))
+        .merge(protected)
+}
+
+#[derive(Deserialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
+}
+
+async fn auth_login(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoginRequest>,
+) -> Result<Response, ApiError> {
+    let Some((username, hash)) = state.db.admin_user().await.map_err(internal_error)? else {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "no admin account configured".to_string()));
+    };
+    if req.username != username || !auth::verify_password(&req.password, &hash) {
+        return Err((StatusCode::UNAUTHORIZED, "invalid username or password".to_string()));
+    }
+    let token = auth::generate_token();
+    state
+        .db
+        .create_session(&token, auth::session_expiry())
+        .await
+        .map_err(internal_error)?;
+    let (name, value) = auth::set_cookie_header(&token);
+    Ok((StatusCode::NO_CONTENT, [(name, value)]).into_response())
+}
+
+async fn auth_logout(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+) -> Result<Response, ApiError> {
+    if let Some(cookie) = req.headers().get(axum::http::header::COOKIE) {
+        if let Ok(cookie) = cookie.to_str() {
+            for part in cookie.split(';') {
+                if let Some(token) = part.trim().strip_prefix(&format!("{}=", auth::SESSION_COOKIE)) {
+                    let _ = state.db.delete_session(token).await;
+                }
+            }
+        }
+    }
+    let (name, value) = auth::clear_cookie_header();
+    Ok((StatusCode::NO_CONTENT, [(name, value)]).into_response())
+}
+
+#[derive(Serialize)]
+struct MeResponse {
+    username: String,
+}
+
+async fn auth_me(State(state): State<Arc<AppState>>) -> Result<Json<MeResponse>, ApiError> {
+    let (username, _) = state
+        .db
+        .admin_user()
+        .await
+        .map_err(internal_error)?
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no admin account configured".to_string()))?;
+    Ok(Json(MeResponse { username }))
+}
+
+#[derive(Deserialize)]
+struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+async fn auth_change_password(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<StatusCode, ApiError> {
+    validate::validate_password(&req.new_password).map_err(bad_request)?;
+    let (username, hash) = state
+        .db
+        .admin_user()
+        .await
+        .map_err(internal_error)?
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no admin account configured".to_string()))?;
+    if !auth::verify_password(&req.current_password, &hash) {
+        return Err((StatusCode::UNAUTHORIZED, "current password is incorrect".to_string()));
+    }
+    state
+        .db
+        .set_admin_user(&username, &auth::hash_password(&req.new_password))
+        .await
+        .map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 type ApiError = (StatusCode, String);

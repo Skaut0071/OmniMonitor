@@ -139,3 +139,42 @@ export function streamWsUrl(cameraId: string): string {
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${window.location.host}/api/stream/${cameraId}`;
 }
+
+export interface Me {
+  username: string;
+}
+
+/** Returns the logged-in username, or null if there's no valid session. */
+export async function me(): Promise<Me | null> {
+  const res = await fetch(`${BASE}/auth/me`);
+  if (res.status === 401) return null;
+  return unwrap(res, "failed to check session");
+}
+
+export async function login(username: string, password: string): Promise<void> {
+  const res = await fetch(`${BASE}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `login failed: ${res.status}`);
+  }
+}
+
+export async function logout(): Promise<void> {
+  await fetch(`${BASE}/auth/logout`, { method: "POST" });
+}
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  const res = await fetch(`${BASE}/auth/change-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `failed to change password: ${res.status}`);
+  }
+}

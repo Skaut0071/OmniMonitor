@@ -24,6 +24,8 @@ pub enum ValidationError {
     InvalidSensitivity,
     #[error("webhook URL must start with http:// or https://")]
     InvalidWebhookUrl,
+    #[error("password must be at least 8 characters")]
+    PasswordTooShort,
 }
 
 pub fn validate_camera_name(name: &str) -> Result<(), ValidationError> {
@@ -82,6 +84,13 @@ pub fn validate_retention(
 pub fn validate_sensitivity(sensitivity: u8) -> Result<(), ValidationError> {
     if !(1..=100).contains(&sensitivity) {
         return Err(ValidationError::InvalidSensitivity);
+    }
+    Ok(())
+}
+
+pub fn validate_password(password: &str) -> Result<(), ValidationError> {
+    if password.chars().count() < 8 {
+        return Err(ValidationError::PasswordTooShort);
     }
     Ok(())
 }

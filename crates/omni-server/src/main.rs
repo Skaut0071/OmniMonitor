@@ -1,3 +1,4 @@
+mod auth;
 mod discovery;
 mod motion;
 mod retention;
@@ -36,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
     let config = AppConfig::default();
     std::fs::create_dir_all(config.recordings_dir())?;
     let db = Db::connect(&config.db_path()).await?;
+    auth::bootstrap_admin(&db).await?;
 
     auto_discover_usb_cameras(&db).await;
 
@@ -55,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tokio::spawn(retention::run(db.clone(), PathBuf::from(&config.data_dir)));
+    tokio::spawn(auth::run_session_sweeper(db.clone()));
 
     let state = Arc::new(AppState {
         db,
@@ -70,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
         ServeDir::new(&frontend_dist).not_found_service(ServeFile::new(index_html));
 
     let app = Router::new()
-        .merge(routes::api_routes())
+        .merge(routes::api_routes(Arc::clone(&state)))
         .fallback_service(static_service)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
