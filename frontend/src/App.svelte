@@ -6,6 +6,7 @@
   import RecordingsModal from "./lib/RecordingsModal.svelte";
   import Login from "./lib/Login.svelte";
   import ChangePasswordModal from "./lib/ChangePasswordModal.svelte";
+  import RtspCredentialsModal from "./lib/RtspCredentialsModal.svelte";
   import { listCameras, discoverCameras, deleteCamera, me, logout, type Camera } from "./lib/api";
 
   let authChecked = false;
@@ -15,6 +16,7 @@
   let loading = true;
   let showAddModal = false;
   let showChangePassword = false;
+  let showRtspCredentials = false;
   let loadError = "";
   let settingsCamera: Camera | null = null;
   let recordingsCamera: Camera | null = null;
@@ -83,6 +85,7 @@
         <div class="account">
           <span class="username">{username}</span>
           <button class="link" on:click={() => (showChangePassword = true)}>Change password</button>
+          <button class="link" on:click={() => (showRtspCredentials = true)}>RTSP credentials</button>
           <button class="link" on:click={signOut}>Sign out</button>
         </div>
       </div>
@@ -140,6 +143,10 @@
 
   {#if showChangePassword}
     <ChangePasswordModal on:close={() => (showChangePassword = false)} />
+  {/if}
+
+  {#if showRtspCredentials}
+    <RtspCredentialsModal on:close={() => (showRtspCredentials = false)} />
   {/if}
 {/if}
 

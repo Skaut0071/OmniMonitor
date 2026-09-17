@@ -5,14 +5,15 @@ for a Ubiquiti-Protect-style dashboard UI/UX with **USB webcams treated as
 first-class cameras** - plug in a UVC camera over USB and it gets the same
 live-preview and recording pipeline a network/RTSP camera would.
 
-Status: **early (v0.5)**. Live preview over WebRTC, continuous or
+Status: **early (v0.5.1)**. Live preview over WebRTC, continuous or
 motion-triggered segmented recording with retention, motion detection
-with webhook alerts, single-account login, and an RTSP server that
-re-serves every camera (USB included) to third-party NVR/VMS/player
-software all work end-to-end for USB *and* RTSP cameras (most WiFi/PoE IP
-cameras speak RTSP - that's the protocol this targets for network
-cameras). See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next and
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how it's built and why.
+with webhook alerts, single-account login, and an authenticated RTSP
+server that re-serves every camera (USB included) to third-party
+NVR/VMS/player software all work end-to-end for USB *and* RTSP cameras
+(most WiFi/PoE IP cameras speak RTSP - that's the protocol this targets
+for network cameras). See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's
+next and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how it's
+built and why.
 
 ## Stack
 
@@ -70,6 +71,16 @@ That's printed exactly once - log in with it and change it from the
 sidebar ("Change password"), or set `OMNI_ADMIN_PASSWORD` in the
 environment before the very first run to pick your own instead.
 
+The RTSP server (below) needs its own credential, bootstrapped the same
+way - check the log for:
+
+```
+No RTSP credential existed - created one. Username: rtsp  Password: <random>
+```
+
+View or copy it any time from the sidebar ("RTSP credentials"), or set
+`OMNI_RTSP_PASSWORD` before the very first run to pick your own.
+
 Any USB camera visible to the OS (e.g. `/dev/video0`) is auto-discovered
 on startup - if you plug one in after starting the server, click "Rescan
 USB cameras" in the sidebar (or
@@ -82,8 +93,8 @@ max total size), and to turn on motion detection/webhook alerts
 independently of recording. Click the record icon to browse/play back
 recordings and view the motion event log. Every camera is also available
 to any RTSP client at `rtsp://<host>:5544/<camera-id>` (its id from
-`GET /api/cameras`) with no extra setup - try
-`ffplay rtsp://<host>:5544/<camera-id>` or add it in VLC.
+`GET /api/cameras`), authenticated with the RTSP credential above - try
+`ffplay rtsp://rtsp:<password>@<host>:5544/<camera-id>` or add it in VLC.
 
 ### Development loop
 
@@ -116,6 +127,7 @@ cd frontend && npm install && npm run dev
 | POST   | `/api/auth/logout`                   | Clear the current session.                |
 | GET    | `/api/auth/me`                       | `{"username": ...}` if logged in, 401 otherwise. |
 | POST   | `/api/auth/change-password`          | `{current_password, new_password}`.       |
+| GET    | `/api/rtsp-credentials`              | `{username, password, port}` for the RTSP server. |
 
 Every endpoint above `/api/auth/login` requires a valid session cookie
 (set by logging in) - see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#authentication).
@@ -124,10 +136,10 @@ Every endpoint above `/api/auth/login` requires a valid session cookie
 
 Deliberate choice for early versions: the server speaks plain HTTP on
 8090. If you need TLS, put a reverse proxy in front of it or use your own
-port-forwarding/tunnel setup. There's now a login (see above), but it's
-still a single account with no rate limiting, and the RTSP port (5544)
-has no authentication at all yet - don't expose either to the open
-internet as-is.
+port-forwarding/tunnel setup. There's a login (see above) and the RTSP
+port (5544) now requires its own credential too, but both are still a
+single account/secret with no rate limiting and no encryption on the
+wire - don't expose either to the open internet as-is.
 
 ## License
 

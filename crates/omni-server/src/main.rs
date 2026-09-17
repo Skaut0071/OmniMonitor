@@ -40,6 +40,7 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(config.recordings_dir())?;
     let db = Db::connect(&config.db_path()).await?;
     auth::bootstrap_admin(&db).await?;
+    let (rtsp_username, rtsp_password) = auth::bootstrap_rtsp_credentials(&db).await?;
 
     auto_discover_usb_cameras(&db).await;
 
@@ -61,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(retention::run(db.clone(), PathBuf::from(&config.data_dir)));
     tokio::spawn(auth::run_session_sweeper(db.clone()));
 
-    let rtsp_server = RtspServer::start(config.rtsp_port);
+    let rtsp_server = RtspServer::start(config.rtsp_port, &rtsp_username, &rtsp_password);
 
     let state = Arc::new(AppState {
         db,

@@ -35,25 +35,51 @@ pub struct RtspServer {
     /// look the right one up instead of trying to reconstruct it.
     factories: Mutex<HashMap<Uuid, gstreamer_rtsp_server::RTSPMediaFactory>>,
     rt_handle: tokio::runtime::Handle,
+    /// Role-grant structure applied to every camera's factory, built once
+    /// in `start`. Verified via a standalone Python GI test that
+    /// `add_role_from_structure` (the only role-granting API the Rust
+    /// bindings expose) needs a structure named after the role, with
+    /// `media.factory.access`/`media.factory.construct` set to plain
+    /// booleans - a `glib::Variant`-wrapped bool silently produces a 404
+    /// on access, not the expected success or 401.
+    role_structure: gst::Structure,
 }
 
 impl RtspServer {
     /// Starts the RTSP server on `port` on a dedicated OS thread (GLib's
     /// main loop is blocking) and returns a handle for registering
-    /// per-camera mount points. `state` isn't available yet at this
-    /// point in startup (it needs `Arc<Self>` first) - callers finish
-    /// wiring it in via `set_state`.
-    pub fn start(port: u16) -> Arc<Self> {
+    /// per-camera mount points. Every mount point requires HTTP Basic
+    /// auth with `rtsp_username`/`rtsp_password` - unauthenticated
+    /// requests get a bare 401, per a deny-by-default empty
+    /// `RTSPToken` set as the server's default token.
+    pub fn start(port: u16, rtsp_username: &str, rtsp_password: &str) -> Arc<Self> {
         let server = RTSPServer::default();
         server.set_service(&port.to_string());
         let mount_points = server
             .mount_points()
             .expect("a freshly constructed RTSPServer always has mount points");
 
+        let auth = gstreamer_rtsp_server::RTSPAuth::new();
+        let credential =
+            glib::base64_encode(format!("{rtsp_username}:{rtsp_password}").as_bytes());
+        let token = gstreamer_rtsp_server::RTSPToken::builder()
+            .field("media.factory.role", "user")
+            .build();
+        auth.add_basic(credential.as_str(), &token);
+        let mut default_token = gstreamer_rtsp_server::RTSPToken::builder().build();
+        auth.set_default_token(Some(&mut default_token));
+        server.set_auth(Some(&auth));
+
+        let role_structure = gst::Structure::builder("user")
+            .field("media.factory.access", true)
+            .field("media.factory.construct", true)
+            .build();
+
         let this = Arc::new(Self {
             mount_points,
             factories: Mutex::new(HashMap::new()),
             rt_handle: tokio::runtime::Handle::current(),
+            role_structure,
         });
 
         std::thread::spawn(move || {
@@ -88,6 +114,7 @@ impl RtspServer {
         // `Supervisor::acquire_viewer` slot, same as two WebRTC viewers
         // would.
         factory.set_shared(false);
+        factory.add_role_from_structure(&self.role_structure);
 
         let this = Arc::clone(self);
         let camera_for_cb = camera.clone();

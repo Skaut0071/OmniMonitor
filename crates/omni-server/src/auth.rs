@@ -73,6 +73,27 @@ pub async fn bootstrap_admin(db: &omni_db::Db) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Ensures the RTSP server's Basic-auth credential exists (separate from
+/// the HTTP admin account - see `Db::rtsp_credentials`'s docs for why).
+/// Same bootstrap pattern: `OMNI_RTSP_PASSWORD` if set, else random and
+/// printed once.
+pub async fn bootstrap_rtsp_credentials(db: &omni_db::Db) -> anyhow::Result<(String, String)> {
+    if let Some(creds) = db.rtsp_credentials().await? {
+        return Ok(creds);
+    }
+    let password = match std::env::var("OMNI_RTSP_PASSWORD") {
+        Ok(p) if !p.is_empty() => p,
+        _ => generate_token(),
+    };
+    db.set_rtsp_credentials("rtsp", &password).await?;
+    tracing::warn!(
+        "No RTSP credential existed - created one. Username: rtsp  Password: {password}\n\
+         This is only printed once. View it from the UI (Settings), or set OMNI_RTSP_PASSWORD \
+         before first boot next time to control it yourself."
+    );
+    Ok(("rtsp".to_string(), password))
+}
+
 /// New session lifetime, used both by the login handler (to know when to
 /// expire it in the DB) and when writing the `Set-Cookie` header (whose
 /// `Max-Age` should match).

@@ -191,6 +191,25 @@ impl Db {
         .execute(&self.pool)
         .await?;
 
+        // Singleton row, separate from `admin_user`. RTSP Basic auth
+        // needs the plaintext password at server-start time (to build
+        // the "user:pass" credential GStreamer's RTSPAuth checks
+        // against) - unlike the HTTP admin password, there's no
+        // one-way-hash option here, so this is intentionally a distinct,
+        // narrower-blast-radius credential rather than reusing the admin
+        // one. See docs/ARCHITECTURE.md.
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS rtsp_credentials (
+                id        INTEGER PRIMARY KEY CHECK (id = 1),
+                username  TEXT NOT NULL,
+                password  TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         // SQLite has no "ADD COLUMN IF NOT EXISTS", so each ALTER TABLE
         // below fails with "duplicate column name" once it's already been
         // applied to a given database file - that specific error is
@@ -389,6 +408,31 @@ impl Db {
         )
         .bind(username)
         .bind(password_hash)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The RTSP server's Basic-auth credential, if bootstrapped yet.
+    pub async fn rtsp_credentials(&self) -> Result<Option<(String, String)>> {
+        let row = sqlx::query("SELECT username, password FROM rtsp_credentials WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(match row {
+            Some(row) => Some((row.try_get("username")?, row.try_get("password")?)),
+            None => None,
+        })
+    }
+
+    pub async fn set_rtsp_credentials(&self, username: &str, password: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO rtsp_credentials (id, username, password) VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET username = excluded.username, password = excluded.password
+            "#,
+        )
+        .bind(username)
+        .bind(password)
         .execute(&self.pool)
         .await?;
         Ok(())

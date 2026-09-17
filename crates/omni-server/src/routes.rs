@@ -40,6 +40,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/api/cameras/:id/motion", get(get_motion_status))
         .route("/api/cameras/:id/events", get(list_events))
+        .route("/api/rtsp-credentials", get(get_rtsp_credentials))
         .route("/api/stream/:camera_id", get(stream_ws_handler))
         .route("/api/auth/me", get(auth_me))
         .route("/api/auth/logout", post(auth_logout))
@@ -144,6 +145,33 @@ type ApiError = (StatusCode, String);
 
 async fn get_config(State(state): State<Arc<AppState>>) -> Json<omni_core::AppConfig> {
     Json(state.config.clone())
+}
+
+#[derive(Serialize)]
+struct RtspCredentialsResponse {
+    username: String,
+    password: String,
+    port: u16,
+}
+
+/// Surfaces the RTSP Basic-auth credential the server bootstrapped (or
+/// was given via `OMNI_RTSP_PASSWORD`) so it's discoverable from the UI
+/// without digging through logs - see `auth::bootstrap_rtsp_credentials`.
+/// Gated behind the same session auth as everything else in `protected`.
+async fn get_rtsp_credentials(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<RtspCredentialsResponse>, ApiError> {
+    let (username, password) = state
+        .db
+        .rtsp_credentials()
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "no RTSP credential configured".to_string()))?;
+    Ok(Json(RtspCredentialsResponse {
+        username,
+        password,
+        port: state.config.rtsp_port,
+    }))
 }
 
 async fn list_cameras(State(state): State<Arc<AppState>>) -> Json<Vec<Camera>> {

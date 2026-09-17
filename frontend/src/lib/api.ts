@@ -178,3 +178,14 @@ export async function changePassword(currentPassword: string, newPassword: strin
     throw new Error(text || `failed to change password: ${res.status}`);
   }
 }
+
+export interface RtspCredentials {
+  username: string;
+  password: string;
+  port: number;
+}
+
+export async function getRtspCredentials(): Promise<RtspCredentials> {
+  const res = await fetch(`${BASE}/rtsp-credentials`);
+  return unwrap(res, "failed to load RTSP credentials");
+}

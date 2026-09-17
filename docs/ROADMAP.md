@@ -91,6 +91,20 @@ order the project intends to tackle things.
       RTSP client and a WebRTC viewer at the same time with neither
       affecting the other.
 
+## v0.5.1 - RTSP server authentication - done
+
+- [x] RTSP Basic auth (`GstRTSPAuth`) on every mount point - a client
+      with no or wrong credentials gets a `401` on `DESCRIBE`. Single
+      shared credential (`rtsp` / random password, or `OMNI_RTSP_PASSWORD`),
+      bootstrapped the same way as the HTTP admin account and stored in
+      `rtsp_credentials` (plaintext - required by `GstRTSPAuth`'s
+      mechanism, see `docs/ARCHITECTURE.md`).
+- [x] `GET /api/rtsp-credentials` (session-gated) plus an "RTSP
+      credentials" panel in the UI sidebar to view/copy them.
+- [x] Verified against real clients: wrong password, no password, and
+      correct password all tested with `ffprobe` against a live USB
+      camera's mount point.
+
 ## Later / unscheduled
 
 - [ ] Apply camera settings changes (recording toggle, resolution, motion
@@ -100,9 +114,9 @@ order the project intends to tackle things.
       for `RecordingTrigger::Motion` cameras noted in
       `docs/ARCHITECTURE.md` (event tracking needs to live above the
       per-pipeline-instance watcher, keyed by camera).
-- [ ] Multi-user / per-camera permissions - still single-account only.
-- [ ] RTSP server authentication (basic/digest) - port 5544 is currently
-      wide open to anyone who can reach it.
+- [ ] Multi-user / per-camera permissions - still single-account only,
+      and the RTSP credential (above) is a single shared secret too, not
+      per-camera.
 - [ ] ONVIF/mDNS discovery for RTSP cameras, instead of adding by URL.
 - [ ] Trickle ICE (current signaling waits for full gathering before
       sending offer/answer - simpler, marginally higher latency).

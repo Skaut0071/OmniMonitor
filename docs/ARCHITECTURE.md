@@ -362,6 +362,36 @@ re-registered idempotently on `/api/cameras/discover`) - not tied to
 recording or motion settings, since registering one is cheap: it doesn't
 start a pipeline until an RTSP client actually connects.
 
+### RTSP server authentication (v0.5.1)
+
+Every mount point requires HTTP Basic auth via `GstRTSPAuth` - a client
+with no or wrong credentials gets a bare `401 Unauthorized` on
+`DESCRIBE`, verified against real `ffprobe`/`gst-launch-1.0 rtspsrc`
+sessions (wrong password, no password, and correct password all tested).
+
+The single RTSP credential (username `rtsp`, random password unless
+`OMNI_RTSP_PASSWORD` is set - same bootstrap pattern as the HTTP admin
+account, see "Authentication" below) is stored **in plaintext** in
+`rtsp_credentials` (`omni-db`), unlike the HTTP admin account's one-way
+argon2 hash. This is a deliberate, unavoidable difference: `GstRTSPAuth`'s
+Basic-auth mechanism needs the plaintext credential at server-start time
+to build its base64 `add_basic()` token - there's no server-side
+"verify against a hash" hook to use instead. It's viewable/reset from the
+UI ("RTSP credentials" in the sidebar) or `GET /api/rtsp-credentials`
+(session-gated, same as every other `/api/*` route).
+
+Getting the Rust API right took an empirical detour: the Rust bindings
+only expose `RTSPMediaFactoryExtManual::add_role_from_structure` (not the
+C API's `add_role`/`RTSPPermissions` convenience wrappers), and a
+`gst::Structure` field set via a `glib::Variant`-wrapped bool silently
+produces a `404` on access instead of the expected `401`/success - it
+needs a plain Rust `bool` passed straight to `.field(...)`. This was
+confirmed with a standalone Python GI script before writing the Rust
+version, following the same "verify the exact mechanism outside Rust
+first" discipline established during the motion-detection valve
+debugging (see above) - swapping the Variant-wrapped bool for a plain
+one was the one-line fix that made it work.
+
 ## Signaling protocol (non-trickle ICE)
 
 `GET/WS /api/stream/:camera_id`:
@@ -423,19 +453,22 @@ server is plain HTTP on port 8090. If you need TLS, put a reverse proxy
 own certificate termination. This keeps local/LAN setup friction-free,
 which matters more than TLS for a device where the HTTP login is
 itself unauthenticated-by-default over the wire (a plain cookie, no
-encryption) and the RTSP server (below) has no auth concept at all.
+encryption) and RTSP Basic auth (see above) sends credentials in
+base64, not encrypted.
 
-## Known limitations / honest gaps in v0.5
+## Known limitations / honest gaps in v0.5.1
 
 - **Single account, no rate limiting on login, no lockout after repeated
   failures.** Anyone who can reach port 8090 can attempt to log in; a
   successful session then has full access to view, reconfigure, and
   delete recordings for every camera. Fine on a trusted LAN, not
   something to expose to the open internet as-is.
-- **The RTSP server (port 5544) has no authentication at all** - RTSP
-  itself supports basic/digest auth, but it isn't wired up. Anyone who
-  can reach port 5544 can view any camera's live stream. Treat it the
-  same as the HTTP API: fine on a trusted LAN, not for the open internet.
+- **The RTSP server (port 5544) has a single shared credential, not
+  per-camera or per-user permissions** - every camera's mount point
+  grants the same "user" role to the same Basic-auth credential. Good
+  enough to keep it off a trusted LAN's uninvited guests; not
+  fine-grained, and Basic auth over RTSP isn't encrypted (see "HTTPS"
+  above) - don't expose port 5544 to the open internet as-is.
 - **A settings change disconnects active viewers of that camera** (see
   "One shared pipeline per camera" above) rather than applying live -
   and for `RecordingTrigger::Motion` cameras, this now also happens on
