@@ -9,7 +9,10 @@ pub mod discover;
 pub mod pipeline;
 
 pub use discover::{list_capture_devices, DiscoveredDevice};
-pub use pipeline::{CaptureHandle, CaptureSession, EncodedFrame, PipelineConfig};
+pub use pipeline::{
+    CaptureError, CaptureHandle, CaptureSession, CaptureSource, EncodedFrame, PipelineConfig,
+    RecordingSink,
+};
 
 /// Must be called once before any `CaptureSession` is created.
 pub fn init() -> anyhow::Result<()> {

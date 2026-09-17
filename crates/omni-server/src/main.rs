@@ -1,6 +1,8 @@
 mod discovery;
+mod retention;
 mod routes;
 mod state;
+mod supervisor;
 mod ws;
 
 use std::net::SocketAddr;
@@ -17,6 +19,7 @@ use omni_db::Db;
 
 use discovery::auto_discover_usb_cameras;
 use state::AppState;
+use supervisor::Supervisor;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -35,9 +38,26 @@ async fn main() -> anyhow::Result<()> {
 
     auto_discover_usb_cameras(&db).await;
 
+    let supervisor = Arc::new(Supervisor::new(PathBuf::from(&config.data_dir)));
+
+    // Cameras with recording enabled get a persistent pipeline running
+    // from boot, independent of whether anyone is watching live.
+    for camera in db.list_cameras().await.unwrap_or_default() {
+        if camera.recording.enabled {
+            if let Err(err) = supervisor.ensure_running(&camera).await {
+                tracing::error!(camera = %camera.id, %err, "failed to start recording pipeline at boot");
+            } else {
+                tracing::info!(camera = %camera.id, name = %camera.name, "recording pipeline started");
+            }
+        }
+    }
+
+    tokio::spawn(retention::run(db.clone(), PathBuf::from(&config.data_dir)));
+
     let state = Arc::new(AppState {
         db,
         config: config.clone(),
+        supervisor,
     });
 
     let frontend_dist = PathBuf::from(

@@ -1,18 +1,22 @@
-//! Bridges an `omni_capture::CaptureSession`'s encoded VP8 frames to a
-//! browser over WebRTC using `webrtc-rs`.
+//! Bridges a camera's encoded VP8 frames (from `omni_capture::CaptureSession`)
+//! to a browser over WebRTC using `webrtc-rs`.
 //!
 //! GStreamer owns capture + encode (see `omni-capture`); this crate owns
-//! nothing about V4L2 or pixels, only RTP/ICE/DTLS transport. Signaling
-//! (the offer/answer exchange itself) happens over a plain WebSocket in
-//! `omni-server` - this crate just turns an offer SDP into an answer SDP
-//! and a running frame-forwarding task.
+//! nothing about V4L2/RTSP or pixels, only RTP/ICE/DTLS transport. It also
+//! doesn't own the capture pipeline itself - that's shared across every
+//! viewer of a camera and lives in `omni-server`'s supervisor, so this
+//! crate just consumes a `broadcast::Receiver<EncodedFrame>` (one per
+//! viewer) plus a shared pipeline-health watch. Signaling (the
+//! offer/answer exchange) happens over a plain WebSocket in `omni-server` -
+//! this crate turns an offer SDP into an answer SDP and a running
+//! frame-forwarding task.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use omni_capture::{CaptureHandle, CaptureSession, EncodedFrame};
-use tokio::sync::mpsc;
+use omni_capture::EncodedFrame;
+use tokio::sync::{broadcast, watch};
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_VP8};
 use webrtc::api::APIBuilder;
@@ -27,27 +31,26 @@ use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
 
-/// A live browser<->camera WebRTC session. Dropping this tears down the
-/// peer connection, stops the frame-forwarding task, and (via owning the
-/// `CaptureSession`) stops the GStreamer capture pipeline.
+/// A live browser<->camera WebRTC session for one viewer. Dropping this
+/// tears down the peer connection and stops the frame-forwarding task.
+/// The underlying capture pipeline is *not* owned here - see
+/// `omni-server::supervisor::ViewerGuard` for that lifecycle.
 pub struct StreamSession {
     peer_connection: Arc<RTCPeerConnection>,
-    _capture: CaptureSession,
     _forward_task: tokio::task::JoinHandle<()>,
     _rtcp_task: tokio::task::JoinHandle<()>,
     _error_watch_task: tokio::task::JoinHandle<()>,
 }
 
 impl StreamSession {
-    /// Consumes a browser SDP offer and a running capture pipeline, and
-    /// returns the session plus the SDP answer to send back.
-    pub async fn start(offer_sdp: &str, capture: CaptureHandle) -> Result<(Self, String)> {
-        let CaptureHandle {
-            session: capture_session,
-            frames,
-            mut error,
-        } = capture;
-
+    /// Consumes a browser SDP offer plus a live view onto a running
+    /// camera pipeline (frames + pipeline-health), and returns the
+    /// session plus the SDP answer to send back.
+    pub async fn start(
+        offer_sdp: &str,
+        frames: broadcast::Receiver<EncodedFrame>,
+        mut error: watch::Receiver<Option<String>>,
+    ) -> Result<(Self, String)> {
         let mut media_engine = MediaEngine::default();
         media_engine
             .register_default_codecs()
@@ -130,12 +133,12 @@ impl StreamSession {
 
         let forward_task = tokio::spawn(forward_frames(track, frames));
 
-        // If the capture pipeline dies after negotiation (e.g. the V4L2
-        // device turned out to be busy - GStreamer only reports that
-        // asynchronously on its bus, well after `set_state` returned Ok),
-        // close the peer connection so the browser sees the failure
-        // instead of a connection that looks "connected" but never
-        // carries any video.
+        // If the shared capture pipeline dies (e.g. the V4L2 device turned
+        // out to be busy, or the RTSP camera dropped the connection -
+        // GStreamer only reports that asynchronously on its bus, well
+        // after `set_state` returned Ok), close this viewer's peer
+        // connection so the browser sees the failure instead of a
+        // connection that looks "connected" but never carries any video.
         let error_watch_pc = Arc::clone(&peer_connection);
         let error_watch_task = tokio::spawn(async move {
             if error.changed().await.is_ok() {
@@ -150,7 +153,6 @@ impl StreamSession {
         Ok((
             Self {
                 peer_connection,
-                _capture: capture_session,
                 _forward_task: forward_task,
                 _rtcp_task: rtcp_task,
                 _error_watch_task: error_watch_task,
@@ -167,9 +169,21 @@ impl StreamSession {
 
 async fn forward_frames(
     track: Arc<TrackLocalStaticSample>,
-    mut frames: mpsc::Receiver<EncodedFrame>,
+    mut frames: broadcast::Receiver<EncodedFrame>,
 ) {
-    while let Some(frame) = frames.recv().await {
+    loop {
+        let frame = match frames.recv().await {
+            Ok(frame) => frame,
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                // This viewer's consumer (write_sample -> WebRTC send)
+                // fell behind the shared pipeline; the oldest frames it
+                // missed are gone. Just resume from the newest one - the
+                // stream self-heals at the next VP8 keyframe.
+                tracing::debug!(skipped, "viewer lagged behind live frame stream");
+                continue;
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        };
         let duration = if frame.duration.is_zero() {
             Duration::from_millis(33)
         } else {

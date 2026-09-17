@@ -6,7 +6,7 @@
 //! (camera config changes and event metadata, not frame data).
 
 use anyhow::Result;
-use omni_core::{Camera, CameraKind, StreamCodec};
+use omni_core::{Camera, CameraKind, RecordingSettings, StreamCodec};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::{FromRow, Row};
 use uuid::Uuid;
@@ -28,6 +28,10 @@ struct CameraRow {
     height: i64,
     framerate: i64,
     codec: String,
+    recording_enabled: bool,
+    segment_seconds: i64,
+    retention_max_age_secs: Option<i64>,
+    retention_max_size_bytes: Option<i64>,
 }
 
 impl TryFrom<CameraRow> for Camera {
@@ -61,6 +65,12 @@ impl TryFrom<CameraRow> for Camera {
             height: row.height as u32,
             framerate: row.framerate as u32,
             codec,
+            recording: RecordingSettings {
+                enabled: row.recording_enabled,
+                segment_seconds: row.segment_seconds as u32,
+                retention_max_age_secs: row.retention_max_age_secs.map(|v| v as u64),
+                retention_max_size_bytes: row.retention_max_size_bytes.map(|v| v as u64),
+            },
             status: None,
         })
     }
@@ -98,6 +108,26 @@ impl Db {
         )
         .execute(&self.pool)
         .await?;
+
+        // Added in v0.2 (recording support). SQLite has no "ADD COLUMN IF
+        // NOT EXISTS", so on a v0.1 database each ALTER TABLE below fails
+        // with "duplicate column name" the first time it's re-run against
+        // an already-migrated v0.2+ database - that specific error is
+        // expected and ignored; anything else is a real failure.
+        for stmt in [
+            "ALTER TABLE cameras ADD COLUMN recording_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE cameras ADD COLUMN segment_seconds INTEGER NOT NULL DEFAULT 300",
+            "ALTER TABLE cameras ADD COLUMN retention_max_age_secs INTEGER",
+            "ALTER TABLE cameras ADD COLUMN retention_max_size_bytes INTEGER",
+        ] {
+            if let Err(err) = sqlx::query(stmt).execute(&self.pool).await {
+                let msg = err.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(err.into());
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -127,8 +157,11 @@ impl Db {
         };
         sqlx::query(
             r#"
-            INSERT INTO cameras (id, name, kind, device_path, rtsp_url, enabled, width, height, framerate, codec)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO cameras (
+                id, name, kind, device_path, rtsp_url, enabled, width, height, framerate, codec,
+                recording_enabled, segment_seconds, retention_max_age_secs, retention_max_size_bytes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 kind = excluded.kind,
@@ -138,7 +171,11 @@ impl Db {
                 width = excluded.width,
                 height = excluded.height,
                 framerate = excluded.framerate,
-                codec = excluded.codec
+                codec = excluded.codec,
+                recording_enabled = excluded.recording_enabled,
+                segment_seconds = excluded.segment_seconds,
+                retention_max_age_secs = excluded.retention_max_age_secs,
+                retention_max_size_bytes = excluded.retention_max_size_bytes
             "#,
         )
         .bind(camera.id.to_string())
@@ -151,6 +188,10 @@ impl Db {
         .bind(camera.height as i64)
         .bind(camera.framerate as i64)
         .bind(codec)
+        .bind(camera.recording.enabled)
+        .bind(camera.recording.segment_seconds as i64)
+        .bind(camera.recording.retention_max_age_secs.map(|v| v as i64))
+        .bind(camera.recording.retention_max_size_bytes.map(|v| v as i64))
         .execute(&self.pool)
         .await?;
         Ok(())

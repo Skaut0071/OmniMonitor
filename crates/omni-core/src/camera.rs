@@ -33,6 +33,36 @@ pub enum CameraStatus {
     Error,
 }
 
+/// Continuous loop-recording settings for one camera. When `enabled`, the
+/// capture pipeline gains a second branch (GStreamer `splitmuxsink`) that
+/// writes fixed-length segment files to disk indefinitely; a background
+/// reaper (`omni-server::retention`) deletes the oldest segments once
+/// `retention_max_age_secs` and/or `retention_max_size_bytes` is exceeded -
+/// "forever loop" recording bounded by age and/or total size, whichever
+/// limit is hit first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingSettings {
+    pub enabled: bool,
+    /// Length of each recorded segment file, in seconds.
+    pub segment_seconds: u32,
+    /// Delete segments older than this many seconds. `None` = no age limit.
+    pub retention_max_age_secs: Option<u64>,
+    /// Delete oldest segments once the camera's recordings directory
+    /// exceeds this many bytes. `None` = no size limit.
+    pub retention_max_size_bytes: Option<u64>,
+}
+
+impl Default for RecordingSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            segment_seconds: 300,
+            retention_max_age_secs: None,
+            retention_max_size_bytes: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Camera {
     pub id: Uuid,
@@ -44,6 +74,8 @@ pub struct Camera {
     pub height: u32,
     pub framerate: u32,
     pub codec: StreamCodec,
+    #[serde(default)]
+    pub recording: RecordingSettings,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<CameraStatus>,
 }
@@ -61,6 +93,7 @@ impl Camera {
             height: 720,
             framerate: 30,
             codec: StreamCodec::Vp8,
+            recording: RecordingSettings::default(),
             status: None,
         }
     }

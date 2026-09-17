@@ -2,12 +2,16 @@
   import { onMount } from "svelte";
   import CameraTile from "./lib/CameraTile.svelte";
   import AddCameraModal from "./lib/AddCameraModal.svelte";
+  import CameraSettingsModal from "./lib/CameraSettingsModal.svelte";
+  import RecordingsModal from "./lib/RecordingsModal.svelte";
   import { listCameras, discoverCameras, deleteCamera, type Camera } from "./lib/api";
 
   let cameras: Camera[] = [];
   let loading = true;
   let showAddModal = false;
   let loadError = "";
+  let settingsCamera: Camera | null = null;
+  let recordingsCamera: Camera | null = null;
 
   async function refresh() {
     try {
@@ -72,10 +76,12 @@
       <div class="grid">
         {#each cameras as camera (camera.id)}
           <div class="grid-item">
-            <CameraTile {camera} />
-            <button class="remove" title="Remove camera" on:click={() => remove(camera.id)}
-              >✕</button
-            >
+            <CameraTile
+              {camera}
+              on:remove={() => remove(camera.id)}
+              on:settings={() => (settingsCamera = camera)}
+              on:recordings={() => (recordingsCamera = camera)}
+            />
           </div>
         {/each}
       </div>
@@ -85,6 +91,18 @@
 
 {#if showAddModal}
   <AddCameraModal on:close={() => (showAddModal = false)} on:created={refresh} />
+{/if}
+
+{#if settingsCamera}
+  <CameraSettingsModal
+    camera={settingsCamera}
+    on:close={() => (settingsCamera = null)}
+    on:updated={refresh}
+  />
+{/if}
+
+{#if recordingsCamera}
+  <RecordingsModal camera={recordingsCamera} on:close={() => (recordingsCamera = null)} />
 {/if}
 
 <style>
@@ -157,29 +175,6 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
     gap: 1rem;
-  }
-  .grid-item {
-    position: relative;
-  }
-  .remove {
-    position: absolute;
-    top: 0.6rem;
-    right: 0.6rem;
-    z-index: 5;
-    background: rgba(0, 0, 0, 0.5);
-    color: #fff;
-    border: none;
-    border-radius: 999px;
-    width: 22px;
-    height: 22px;
-    cursor: pointer;
-    font-size: 0.7rem;
-    line-height: 1;
-    opacity: 0;
-    transition: opacity 0.15s;
-  }
-  .grid-item:hover .remove {
-    opacity: 1;
   }
   .hint,
   .error {

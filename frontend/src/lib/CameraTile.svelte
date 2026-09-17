@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { createEventDispatcher, onDestroy, onMount } from "svelte";
   import type { Camera } from "./api";
   import { streamWsUrl } from "./api";
 
   export let camera: Camera;
+
+  const dispatch = createEventDispatcher();
 
   let videoEl: HTMLVideoElement;
   let status: "connecting" | "live" | "error" | "idle" = "idle";
@@ -113,7 +115,19 @@
 <div class="tile">
   <div class="tile-header">
     <span class="name">{camera.name}</span>
-    <span class="status status-{status}">{status}</span>
+    <div class="badges">
+      {#if camera.recording.enabled}
+        <span class="rec-badge" title="Recording">● REC</span>
+      {/if}
+      <span class="status status-{status}">{status}</span>
+      <button class="icon-btn" title="Recordings" on:click={() => dispatch("recordings")}
+        >⏺</button
+      >
+      <button class="icon-btn" title="Settings" on:click={() => dispatch("settings")}>⚙</button>
+      <button class="icon-btn" title="Remove camera" on:click={() => dispatch("remove")}
+        >✕</button
+      >
+    </div>
   </div>
   <div class="video-wrap">
     <!-- svelte-ignore a11y-media-has-caption -->
@@ -149,6 +163,33 @@
   }
   .name {
     font-weight: 600;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .badges {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-shrink: 0;
+  }
+  .rec-badge {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    color: #e74c3c;
+  }
+  .icon-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 0.75rem;
+    padding: 0.1rem 0.25rem;
+    line-height: 1;
+  }
+  .icon-btn:hover {
     color: var(--text);
   }
   .status {

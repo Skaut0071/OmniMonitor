@@ -3,11 +3,12 @@
 An open-source, self-hosted NVR (Network Video Recorder) for Linux, aiming
 for a Ubiquiti-Protect-style dashboard UI/UX with **USB webcams treated as
 first-class cameras** - plug in a UVC camera over USB and it gets the same
-live-preview (and, eventually, recording) pipeline a network/RTSP camera
-would.
+live-preview and recording pipeline a network/RTSP camera would.
 
-Status: **early (v0.1)**. Live preview over WebRTC works end-to-end for USB
-cameras. No recording, no authentication, no RTSP capture yet - see
+Status: **early (v0.2)**. Live preview over WebRTC and continuous
+segmented recording with retention both work end-to-end for USB *and*
+RTSP cameras (most WiFi/PoE IP cameras speak RTSP - that's the protocol
+this targets for network cameras). No authentication yet - see
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how it's built and why.
 
@@ -57,7 +58,12 @@ OMNI_FRONTEND_DIST=$(pwd)/frontend/dist ./target/release/omni-server
 Then open `http://<host>:8090/` in a browser. Any USB camera visible to
 the OS (e.g. `/dev/video0`) is auto-discovered on startup - if you plug one
 in after starting the server, click "Rescan USB cameras" in the sidebar (or
-`POST /api/cameras/discover`).
+`POST /api/cameras/discover`). Add a network camera with "+ Add camera"
+and its RTSP URL (e.g. `rtsp://192.168.1.50:554/stream1` - check your
+camera's manual for the exact path; most WiFi/PoE IP cameras speak RTSP).
+Click the gear icon on a camera tile to turn on continuous recording and
+set a retention limit (max age and/or max total size); click the record
+icon to browse and play back its recordings.
 
 ### Development loop
 
@@ -70,16 +76,20 @@ cargo run --bin omni-server
 cd frontend && npm install && npm run dev
 ```
 
-## REST API (v0.1)
+## REST API
 
-| Method | Path                      | Description                              |
-|--------|---------------------------|-------------------------------------------|
-| GET    | `/api/config`             | Server config (ports, data dir).          |
-| GET    | `/api/cameras`             | List cameras.                             |
-| POST   | `/api/cameras`             | Add an RTSP camera: `{name, url}`.        |
-| POST   | `/api/cameras/discover`    | Re-scan for USB cameras.                  |
-| DELETE | `/api/cameras/:id`         | Remove a camera.                          |
-| WS     | `/api/stream/:camera_id`   | WebRTC signaling for that camera's live preview. |
+| Method | Path                                 | Description                              |
+|--------|--------------------------------------|-------------------------------------------|
+| GET    | `/api/config`                        | Server config (ports, data dir).          |
+| GET    | `/api/cameras`                       | List cameras.                             |
+| POST   | `/api/cameras`                       | Add an RTSP camera: `{name, url}`.        |
+| PATCH  | `/api/cameras/:id`                   | Update name/url/resolution/recording settings; restarts the camera's pipeline if it's running. |
+| POST   | `/api/cameras/discover`              | Re-scan for USB cameras.                  |
+| DELETE | `/api/cameras/:id`                   | Remove a camera.                          |
+| WS     | `/api/stream/:camera_id`             | WebRTC signaling for that camera's live preview. |
+| GET    | `/api/cameras/:id/recordings`        | List a camera's recorded segments.        |
+| GET    | `/api/recordings/:id/:filename`      | Download/stream a segment (Range-request/seekable). |
+| DELETE | `/api/recordings/:id/:filename`      | Delete a segment.                         |
 
 ## Why no HTTPS by default?
 

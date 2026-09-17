@@ -1,3 +1,10 @@
+export interface RecordingSettings {
+  enabled: boolean;
+  segment_seconds: number;
+  retention_max_age_secs: number | null;
+  retention_max_size_bytes: number | null;
+}
+
 export interface Camera {
   id: string;
   name: string;
@@ -9,34 +16,66 @@ export interface Camera {
   height: number;
   framerate: number;
   codec: "vp8" | "h264";
+  recording: RecordingSettings;
   status?: "idle" | "streaming" | "error";
+}
+
+export interface RecordingInfo {
+  filename: string;
+  size_bytes: number;
+  modified: string;
+}
+
+export interface UpdateCameraRequest {
+  name?: string;
+  url?: string;
+  width?: number;
+  height?: number;
+  framerate?: number;
+  recording?: RecordingSettings;
 }
 
 const BASE = "/api";
 
-export async function listCameras(): Promise<Camera[]> {
-  const res = await fetch(`${BASE}/cameras`);
-  if (!res.ok) throw new Error(`failed to list cameras: ${res.status}`);
+async function unwrap<T>(res: Response, fallback: string): Promise<T> {
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `${fallback}: ${res.status}`);
+  }
   return res.json();
+}
+
+export async function listCameras(): Promise<Camera[]> {
+  return unwrap(await fetch(`${BASE}/cameras`), "failed to list cameras");
 }
 
 export async function discoverCameras(): Promise<Camera[]> {
-  const res = await fetch(`${BASE}/cameras/discover`, { method: "POST" });
-  if (!res.ok) throw new Error(`failed to discover cameras: ${res.status}`);
-  return res.json();
+  return unwrap(
+    await fetch(`${BASE}/cameras/discover`, { method: "POST" }),
+    "failed to discover cameras",
+  );
 }
 
 export async function createRtspCamera(name: string, url: string): Promise<Camera> {
-  const res = await fetch(`${BASE}/cameras`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, url }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `failed to create camera: ${res.status}`);
-  }
-  return res.json();
+  return unwrap(
+    await fetch(`${BASE}/cameras`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, url }),
+    }),
+    "failed to create camera",
+  );
+}
+
+export async function updateCamera(id: string, patch: UpdateCameraRequest): Promise<Camera> {
+  return unwrap(
+    await fetch(`${BASE}/cameras/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
+    "failed to update camera",
+  );
 }
 
 export async function deleteCamera(id: string): Promise<void> {
@@ -44,6 +83,26 @@ export async function deleteCamera(id: string): Promise<void> {
   if (!res.ok && res.status !== 204) {
     throw new Error(`failed to delete camera: ${res.status}`);
   }
+}
+
+export async function listRecordings(cameraId: string): Promise<RecordingInfo[]> {
+  return unwrap(
+    await fetch(`${BASE}/cameras/${cameraId}/recordings`),
+    "failed to list recordings",
+  );
+}
+
+export async function deleteRecording(cameraId: string, filename: string): Promise<void> {
+  const res = await fetch(`${BASE}/recordings/${cameraId}/${encodeURIComponent(filename)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`failed to delete recording: ${res.status}`);
+  }
+}
+
+export function recordingUrl(cameraId: string, filename: string): string {
+  return `${BASE}/recordings/${cameraId}/${encodeURIComponent(filename)}`;
 }
 
 export function streamWsUrl(cameraId: string): string {

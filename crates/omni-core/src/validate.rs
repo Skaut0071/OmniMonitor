@@ -14,6 +14,12 @@ pub enum ValidationError {
     InvalidResolution,
     #[error("framerate must be between 1 and 120")]
     InvalidFramerate,
+    #[error("recording segment length must be between 10 and 3600 seconds")]
+    InvalidSegmentSeconds,
+    #[error("RTSP URL must start with rtsp://")]
+    InvalidRtspUrl,
+    #[error("enable recording requires a max age and/or a max size limit, so it doesn't fill the disk forever")]
+    RecordingWithoutRetentionLimit,
 }
 
 pub fn validate_camera_name(name: &str) -> Result<(), ValidationError> {
@@ -37,6 +43,34 @@ pub fn validate_resolution(width: u32, height: u32) -> Result<(), ValidationErro
 pub fn validate_framerate(fps: u32) -> Result<(), ValidationError> {
     if fps == 0 || fps > 120 {
         return Err(ValidationError::InvalidFramerate);
+    }
+    Ok(())
+}
+
+pub fn validate_segment_seconds(secs: u32) -> Result<(), ValidationError> {
+    if !(10..=3600).contains(&secs) {
+        return Err(ValidationError::InvalidSegmentSeconds);
+    }
+    Ok(())
+}
+
+pub fn validate_rtsp_url(url: &str) -> Result<(), ValidationError> {
+    if !url.trim().starts_with("rtsp://") {
+        return Err(ValidationError::InvalidRtspUrl);
+    }
+    Ok(())
+}
+
+/// A retention policy with neither limit set would record forever without
+/// ever deleting anything, silently filling the disk - require at least
+/// one bound whenever recording is turned on.
+pub fn validate_retention(
+    recording_enabled: bool,
+    max_age_secs: Option<u64>,
+    max_size_bytes: Option<u64>,
+) -> Result<(), ValidationError> {
+    if recording_enabled && max_age_secs.is_none() && max_size_bytes.is_none() {
+        return Err(ValidationError::RecordingWithoutRetentionLimit);
     }
     Ok(())
 }
@@ -68,6 +102,33 @@ mod tests {
         assert_eq!(
             validate_framerate(240),
             Err(ValidationError::InvalidFramerate)
+        );
+    }
+
+    #[test]
+    fn rejects_recording_without_any_retention_limit() {
+        assert_eq!(
+            validate_retention(true, None, None),
+            Err(ValidationError::RecordingWithoutRetentionLimit)
+        );
+    }
+
+    #[test]
+    fn accepts_recording_with_one_retention_limit() {
+        assert!(validate_retention(true, Some(86_400), None).is_ok());
+        assert!(validate_retention(true, None, Some(10_000_000_000)).is_ok());
+    }
+
+    #[test]
+    fn retention_limits_irrelevant_when_recording_disabled() {
+        assert!(validate_retention(false, None, None).is_ok());
+    }
+
+    #[test]
+    fn rejects_non_rtsp_url() {
+        assert_eq!(
+            validate_rtsp_url("http://example.com"),
+            Err(ValidationError::InvalidRtspUrl)
         );
     }
 }

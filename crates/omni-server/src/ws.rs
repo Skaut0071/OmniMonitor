@@ -6,11 +6,10 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use omni_capture::{CaptureSession, PipelineConfig};
-use omni_core::CameraKind;
 use omni_webrtc::StreamSession;
 
 use crate::state::AppState;
+use crate::supervisor::ViewerHandle;
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -29,10 +28,13 @@ enum ServerMsg {
 ///
 /// Protocol (non-trickle ICE, kept deliberately simple for v0.1): the
 /// browser opens the socket, sends `{"type":"offer","sdp":...}`, and the
-/// server starts a capture pipeline + WebRTC peer connection and replies
-/// with `{"type":"answer","sdp":...}` once ICE gathering is complete. The
-/// capture pipeline and peer connection both live for exactly as long as
-/// this socket stays open.
+/// server starts (or joins) that camera's shared capture pipeline via
+/// `Supervisor` and a WebRTC peer connection, replying with
+/// `{"type":"answer","sdp":...}` once ICE gathering is complete. The
+/// viewer's slot on the shared pipeline, and the peer connection, both
+/// live for exactly as long as this socket stays open; if the underlying
+/// pipeline fails or is superseded by a settings change, the server sends
+/// `{"type":"error",...}` and closes the socket itself.
 pub async fn stream_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
@@ -54,14 +56,6 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, camera_id: U
         }
     };
 
-    let device_path = match &camera.kind {
-        CameraKind::Usb { device_path } => device_path.clone(),
-        CameraKind::Rtsp { .. } => {
-            let _ = send_error(&mut socket, "RTSP camera streaming not implemented yet").await;
-            return;
-        }
-    };
-
     let offer_sdp = loop {
         match socket.recv().await {
             Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMsg>(&text) {
@@ -76,15 +70,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, camera_id: U
         }
     };
 
-    let pipeline_config = PipelineConfig {
-        device_path,
-        width: camera.width,
-        height: camera.height,
-        framerate: camera.framerate,
-        bitrate: 2_000_000,
-    };
-
-    let capture = match CaptureSession::start(pipeline_config) {
+    let ViewerHandle {
+        frames,
+        mut ended,
+        _guard,
+    } = match state.supervisor.acquire_viewer(&camera).await {
         Ok(handle) => handle,
         Err(err) => {
             let _ = send_error(&mut socket, &format!("failed to start capture: {err}")).await;
@@ -92,7 +82,8 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, camera_id: U
         }
     };
 
-    let (session, answer_sdp) = match StreamSession::start(&offer_sdp, capture).await {
+    let (session, answer_sdp) = match StreamSession::start(&offer_sdp, frames, ended.clone()).await
+    {
         Ok(pair) => pair,
         Err(err) => {
             let _ = send_error(
@@ -113,12 +104,30 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, camera_id: U
         return;
     }
 
-    while let Some(msg) = socket.recv().await {
-        if msg.is_err() {
-            break;
+    loop {
+        tokio::select! {
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(_)) => continue,
+                    _ => break,
+                }
+            }
+            changed = ended.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let message = ended.borrow().clone();
+                if let Some(message) = message {
+                    let _ = send_error(&mut socket, &message).await;
+                }
+                break;
+            }
         }
     }
+
     let _ = session.close().await;
+    // `_guard` drops here, releasing this viewer's slot on the shared
+    // capture pipeline.
 }
 
 async fn send_error(socket: &mut WebSocket, message: &str) -> Result<(), axum::Error> {

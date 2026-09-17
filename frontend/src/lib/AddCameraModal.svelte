@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from "svelte";
-  import init, { validate_camera_name } from "./wasm/omni_wasm.js";
+  import init, { validate_camera_name, validate_rtsp_url } from "./wasm/omni_wasm.js";
   import { createRtspCamera } from "./api";
 
   const dispatch = createEventDispatcher();
@@ -27,13 +27,10 @@
       error = (e as Error).message;
       return false;
     }
-    const trimmed = url.trim();
-    if (!trimmed) {
-      error = "RTSP URL must not be empty";
-      return false;
-    }
-    if (!trimmed.startsWith("rtsp://")) {
-      error = "RTSP URL must start with rtsp://";
+    try {
+      validate_rtsp_url(url);
+    } catch (e) {
+      error = (e as Error).message;
       return false;
     }
     return true;
