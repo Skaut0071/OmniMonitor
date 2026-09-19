@@ -68,7 +68,21 @@ cp "$ROOT/packaging/omnimonitor.service" /etc/systemd/system/omnimonitor.service
 systemctl daemon-reload
 systemctl enable omnimonitor.service
 
-cat <<EOF
+# Re-running this script (e.g. after `git pull` + a rebuild to update)
+# should just apply the update, not leave the old binary running - if
+# the service was already active, restart it into what was just
+# installed instead of requiring a separate manual step.
+if systemctl is-active --quiet omnimonitor.service; then
+    echo "Service was already running - restarting into the newly installed build..."
+    systemctl restart omnimonitor.service
+    cat <<EOF
+
+Updated and restarted. Tail the log with:
+
+    sudo journalctl -u omnimonitor -f
+EOF
+else
+    cat <<EOF
 
 Installed. Not started yet - start it with:
 
@@ -86,3 +100,4 @@ your own. After editing that file, run:
 
 For HTTPS, see packaging/Caddyfile.example or packaging/nginx.conf.example.
 EOF
+fi

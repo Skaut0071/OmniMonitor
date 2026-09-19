@@ -30,9 +30,39 @@ why.
   every camera also reachable at `rtsp://<host>:5544/<camera-id>` for
   third-party RTSP clients (VLC, `ffprobe`, other NVR/VMS software).
 
-## Quickstart (Linux)
+## Quickstart (Debian/Ubuntu)
 
-### 1. System dependencies
+```bash
+git clone https://github.com/Skaut0071/OmniMonitor.git
+cd OmniMonitor
+./scripts/bootstrap.sh
+```
+
+One command, on a clean machine: installs the system packages (GStreamer
+dev libs, build tools), Rust + `wasm-pack` + Node.js if you don't already
+have them, builds everything, and installs + enables OmniMonitor as a
+systemd service (see "Running as a service" below for what that sets
+up). It asks for `sudo` only for the steps that need it (apt, the
+service install) - run it as your normal user, not as root.
+
+Not an actual `apt install omnimonitor` yet - that needs a hosted,
+signed package repository to maintain, which is a bigger commitment than
+this project has taken on so far (tracked in `docs/ROADMAP.md`). This
+script is the practical equivalent until/unless that happens: one
+command, idempotent (safe to re-run after a `git pull` to rebuild and
+update an existing install).
+
+Then start it and open `http://<host>:8090/` in a browser:
+
+```bash
+sudo systemctl start omnimonitor
+sudo journalctl -u omnimonitor -f   # watch for the first-boot passwords
+```
+
+### Manual build (no system service, e.g. for development)
+
+If you'd rather build and run it directly without installing a service -
+system dependencies:
 
 ```bash
 sudo apt-get update
@@ -47,20 +77,10 @@ sudo apt-get install -y build-essential pkg-config curl git libssl-dev \
 
 Also needed: [Rust](https://rustup.rs) (stable), [wasm-pack](https://rustwasm.github.io/wasm-pack/)
 (`cargo install wasm-pack`), the `wasm32-unknown-unknown` target
-(`rustup target add wasm32-unknown-unknown`), and Node.js 18+.
-
-### 2. Build
+(`rustup target add wasm32-unknown-unknown`), and Node.js 18+. Then:
 
 ```bash
 ./scripts/build-all.sh
-```
-
-This builds the `omni-wasm` module, the Svelte frontend (`frontend/dist`),
-and the release backend binary.
-
-### 3. Run
-
-```bash
 OMNI_FRONTEND_DIST=$(pwd)/frontend/dist ./target/release/omni-server
 ```
 
@@ -103,18 +123,27 @@ to any RTSP client at `rtsp://<host>:5544/<camera-id>` (its id from
 `GET /api/cameras`), authenticated with the RTSP credential above - try
 `ffplay rtsp://rtsp:<password>@<host>:5544/<camera-id>` or add it in VLC.
 
-### Running as a service (recommended for actual deployment)
+### Running as a service, or updating an existing install
 
-The steps above run OmniMonitor directly in a terminal - fine for trying
-it out, but it won't survive a reboot or a crash. To install it as a
-systemd service (dedicated system user, runs under `/opt/omnimonitor` +
-`/var/lib/omnimonitor`, restarts on failure):
+`./scripts/bootstrap.sh` above already does this (dedicated system user,
+runs under `/opt/omnimonitor` + `/var/lib/omnimonitor`, restarts on
+failure) as its last step. If you already have the toolchain installed
+and just want to (re)build and (re)install - e.g. after `git pull` to
+update - skip straight to:
 
 ```bash
 ./scripts/build-all.sh
 sudo ./scripts/install.sh
+```
+
+`install.sh` is safe to re-run: if the service is already active it
+rebuilds/reinstalls the files in place and restarts it into the new
+build; if it's not running yet, it enables the unit without starting it
+so you can start it (and see the first-boot passwords) yourself:
+
+```bash
 sudo systemctl start omnimonitor
-sudo journalctl -u omnimonitor -f   # watch for the first-boot passwords
+sudo journalctl -u omnimonitor -f
 ```
 
 See `packaging/omnimonitor.service` for the unit file (also where

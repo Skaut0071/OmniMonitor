@@ -160,6 +160,17 @@ order the project intends to tackle things.
       `/api/auth/login` after 3 free failures, capped at a 5-minute
       lockout, reset on success (`auth::LoginRateLimiter`). Verified
       against a live server end-to-end (see `docs/ARCHITECTURE.md`).
+- [x] `scripts/bootstrap.sh`: one command from a clean Debian/Ubuntu
+      machine to a running service - installs system packages, Rust/
+      wasm-pack/Node.js if missing (checking actual versions present,
+      not just presence, since distro-packaged Node is sometimes too
+      old for Vite), builds everything, and hands off to
+      `scripts/install.sh`. Not a real `apt install omnimonitor` (see
+      "Later" below for what that would actually take) but closes the
+      practical gap until/unless that happens. `scripts/install.sh`
+      itself made idempotent - re-running it after a rebuild now
+      restarts an already-running service into the new build instead of
+      just enabling the unit again.
 
 ## Later / unscheduled
 
@@ -182,3 +193,10 @@ order the project intends to tackle things.
 - [ ] Postgres backend option for multi-node deployments, if that ever
       becomes a real use case (SQLite remains the default - see
       `docs/ARCHITECTURE.md`).
+- [ ] Real `.deb`/apt-repo packaging (`apt install omnimonitor`) -
+      `scripts/bootstrap.sh` (above) is the one-command equivalent for
+      now. Actual apt distribution needs a hosted, signed package
+      repository (GPG key management, a repo server, a release process
+      that publishes to it) which is real ongoing infrastructure to
+      maintain, not just a build step - worth it once there's an
+      audience to justify maintaining it.
