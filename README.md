@@ -30,7 +30,27 @@ why.
   every camera also reachable at `rtsp://<host>:5544/<camera-id>` for
   third-party RTSP clients (VLC, `ffprobe`, other NVR/VMS software).
 
-## Quickstart (Debian/Ubuntu)
+## Quickstart (Debian/Ubuntu, x86_64)
+
+### Option A: download the latest release (fastest, no build required)
+
+```bash
+curl -LO https://github.com/Skaut0071/OmniMonitor/releases/latest/download/omnimonitor-v0.8.1-x86_64-linux.tar.gz
+tar xzf omnimonitor-v0.8.1-x86_64-linux.tar.gz
+cd omnimonitor-v0.8.1-x86_64-linux
+sudo ./scripts/install.sh
+```
+
+Grabs the prebuilt binary + frontend from the
+[latest GitHub release](https://github.com/Skaut0071/OmniMonitor/releases/latest)
+(check that page for the current version - the URL above pins v0.8.1)
+and installs them as a systemd service. Still needs `sudo` for the
+install step itself (creating the service user/unit), but skips
+installing a whole Rust/Node toolchain and the several minutes of
+compiling that goes with it. Only built for x86_64 Linux for now - on
+anything else (ARM, etc.), use Option B.
+
+### Option B: build from source
 
 ```bash
 git clone https://github.com/Skaut0071/OmniMonitor.git
@@ -52,7 +72,10 @@ script is the practical equivalent until/unless that happens: one
 command, idempotent (safe to re-run after a `git pull` to rebuild and
 update an existing install).
 
-Then start it and open `http://<host>:8090/` in a browser:
+### Then
+
+Whichever option you used, start it and open `http://<host>:8090/` in a
+browser:
 
 ```bash
 sudo systemctl start omnimonitor
@@ -125,11 +148,18 @@ to any RTSP client at `rtsp://<host>:5544/<camera-id>` (its id from
 
 ### Running as a service, or updating an existing install
 
-`./scripts/bootstrap.sh` above already does this (dedicated system user,
+Both Quickstart options above already do this (dedicated system user,
 runs under `/opt/omnimonitor` + `/var/lib/omnimonitor`, restarts on
-failure) as its last step. If you already have the toolchain installed
-and just want to (re)build and (re)install - e.g. after `git pull` to
-update - skip straight to:
+failure) as their last step - this section is for updating an install
+that's already running.
+
+**From a new release** (Option A): download and extract the new
+version's tarball as above, then just re-run `sudo ./scripts/install.sh`
+from inside it.
+
+**From source** (Option B): if you already have the toolchain installed
+and just want to (re)build and (re)install - e.g. after `git pull` - skip
+straight to:
 
 ```bash
 ./scripts/build-all.sh
