@@ -117,6 +117,24 @@ order the project intends to tackle things.
       candidates over the existing signaling WebSocket in both
       directions.
 
+## v0.7 - ONVIF network camera discovery - done
+
+- [x] "Scan for network cameras" in "+ Add camera": sends a WS-Discovery
+      multicast probe (`omni-server::onvif_discovery`, no new
+      dependencies - raw UDP via `tokio::net::UdpSocket`) and lists
+      whatever ONVIF device answers within 3 seconds by IP address.
+      Stops short of resolving an actual RTSP stream URI (that needs a
+      further authenticated per-vendor ONVIF call) - picking a result
+      just prefills the host in the RTSP URL field.
+- [x] `POST /api/onvif/discover` (session-gated), returning address +
+      XAddrs for each responder.
+- [x] Verified against the real network (multicast join/send/receive
+      loop runs end-to-end, correctly returns empty after the timeout
+      when nothing answers - no ONVIF camera happened to be reachable
+      from this dev environment) plus unit tests for the XAddrs-parsing
+      logic against real-world WS-Discovery reply shapes (varying
+      namespace prefixes, multiple space-separated XAddrs).
+
 ## Later / unscheduled
 
 - [ ] Apply camera settings changes (recording toggle, resolution, motion
@@ -129,7 +147,6 @@ order the project intends to tackle things.
 - [ ] Multi-user / per-camera permissions - still single-account only,
       and the RTSP credential (above) is a single shared secret too, not
       per-camera.
-- [ ] ONVIF/mDNS discovery for RTSP cameras, instead of adding by URL.
 - [ ] Hardware-accelerated encode (VA-API/NVENC) as an alternative to the
       software `vp8enc` path, for higher camera counts on modest hardware.
 - [ ] H.264 passthrough for RTSP cameras that already send it, instead of

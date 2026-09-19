@@ -17,6 +17,7 @@ use omni_core::{
 
 use crate::auth;
 use crate::discovery::auto_discover_usb_cameras;
+use crate::onvif_discovery::{self, DiscoveredDevice};
 use crate::state::AppState;
 use crate::ws::stream_ws_handler;
 
@@ -29,6 +30,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/config", get(get_config))
         .route("/api/cameras", get(list_cameras).post(create_camera))
         .route("/api/cameras/discover", post(discover_cameras))
+        .route("/api/onvif/discover", post(discover_onvif))
         .route(
             "/api/cameras/:id",
             axum::routing::patch(update_camera).delete(delete_camera),
@@ -188,6 +190,17 @@ async fn discover_cameras(State(state): State<Arc<AppState>>) -> Json<Vec<Camera
         state.rtsp_server.add_camera(Arc::clone(&state), camera.clone());
     }
     Json(cameras)
+}
+
+/// Probes the LAN for ONVIF network cameras (WS-Discovery multicast) and
+/// returns whatever answers within a few seconds - see
+/// `onvif_discovery` for why this stops at "here's an IP and device
+/// service URL" rather than resolving an actual RTSP URI.
+async fn discover_onvif() -> Result<Json<Vec<DiscoveredDevice>>, ApiError> {
+    let devices = onvif_discovery::discover(std::time::Duration::from_secs(3))
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(devices))
 }
 
 /// Only RTSP cameras can be added by hand through this endpoint - USB

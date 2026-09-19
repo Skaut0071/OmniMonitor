@@ -428,6 +428,34 @@ the mechanism is proven end-to-end elsewhere in the project (RTSP,
 motion detection) via the same "verify real behavior, not just
 successful compiles" discipline.
 
+## ONVIF network camera discovery (v0.7)
+
+`omni-server::onvif_discovery` sends a WS-Discovery `Probe` (the
+multicast SOAP-over-UDP protocol ONVIF devices use to announce
+themselves) to `239.255.255.250:3702` and collects `ProbeMatch` replies
+for a fixed 3-second window, deduplicated by source IP. No new
+dependency was needed - `tokio::net::UdpSocket` (already available via
+the `tokio "full"` feature set) handles the multicast join/send/receive
+directly, and XAddrs are pulled out of the raw SOAP reply with a small
+string scan rather than a full XML parser, matching on the unprefixed
+local name (`XAddrs>`) since real cameras use inconsistent namespace
+prefixes (`d:XAddrs`, `wsdd:XAddrs`, `a:XAddrs`, ...).
+
+This deliberately stops at "here's an IP address and ONVIF device
+service URL" - going further to ask the camera for its actual RTSP
+stream URI needs an authenticated `GetStreamUri` SOAP call against that
+device service, which needs per-camera credentials OmniMonitor doesn't
+have at discovery time. So a discovered result just prefills the host in
+"+ Add camera"'s RTSP URL field; the user still fills in the stream path
+and any camera credentials themselves, the same as adding one by hand
+today - this saves the "find the camera's IP" step (previously: check a
+router's DHCP client list or run a separate network scanner), not the
+whole flow.
+
+Multicast doesn't cross routers, so this only ever finds cameras on the
+same LAN segment as the server - expected and fine for the target
+use case (a home/small-site NVR on one local network).
+
 ## Authentication
 
 Single admin account, session cookie, deliberately no more than that for

@@ -74,6 +74,20 @@ export async function discoverCameras(): Promise<Camera[]> {
   );
 }
 
+export interface OnvifDevice {
+  address: string;
+  xaddrs: string[];
+}
+
+// Probes the LAN for ONVIF cameras (WS-Discovery multicast) - takes a
+// few seconds since it waits out a fixed collection window server-side.
+export async function discoverOnvifDevices(): Promise<OnvifDevice[]> {
+  return unwrap(
+    await fetch(`${BASE}/onvif/discover`, { method: "POST" }),
+    "failed to scan for network cameras",
+  );
+}
+
 export async function createRtspCamera(name: string, url: string): Promise<Camera> {
   return unwrap(
     await fetch(`${BASE}/cameras`, {

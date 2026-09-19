@@ -1,6 +1,7 @@
 mod auth;
 mod discovery;
 mod motion;
+mod onvif_discovery;
 mod retention;
 mod routes;
 mod rtsp;

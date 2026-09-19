@@ -5,15 +5,16 @@ for a Ubiquiti-Protect-style dashboard UI/UX with **USB webcams treated as
 first-class cameras** - plug in a UVC camera over USB and it gets the same
 live-preview and recording pipeline a network/RTSP camera would.
 
-Status: **early (v0.5.1)**. Live preview over WebRTC, continuous or
-motion-triggered segmented recording with retention, motion detection
-with webhook alerts, single-account login, and an authenticated RTSP
-server that re-serves every camera (USB included) to third-party
-NVR/VMS/player software all work end-to-end for USB *and* RTSP cameras
-(most WiFi/PoE IP cameras speak RTSP - that's the protocol this targets
-for network cameras). See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's
-next and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how it's
-built and why.
+Status: **early (v0.7)**. Live preview over WebRTC (trickle ICE),
+continuous or motion-triggered segmented recording with retention,
+motion detection with webhook alerts, single-account login, an
+authenticated RTSP server that re-serves every camera (USB included) to
+third-party NVR/VMS/player software, and ONVIF network-camera discovery
+all work end-to-end for USB *and* RTSP cameras (most WiFi/PoE IP cameras
+speak RTSP - that's the protocol this targets for network cameras). See
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next and
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how it's built and
+why.
 
 ## Stack
 
@@ -86,7 +87,10 @@ on startup - if you plug one in after starting the server, click "Rescan
 USB cameras" in the sidebar (or
 `POST /api/cameras/discover`). Add a network camera with "+ Add camera"
 and its RTSP URL (e.g. `rtsp://192.168.1.50:554/stream1` - check your
-camera's manual for the exact path; most WiFi/PoE IP cameras speak RTSP).
+camera's manual for the exact path; most WiFi/PoE IP cameras speak
+RTSP), or click "Scan for network cameras" there first if it supports
+ONVIF - it'll list any camera that answers on the LAN by IP address so
+you don't have to go find that in your router's DHCP client list.
 Click the gear icon on a camera tile to turn on recording (continuous, or
 only while motion is detected) and set a retention limit (max age and/or
 max total size), and to turn on motion detection/webhook alerts
@@ -116,6 +120,7 @@ cd frontend && npm install && npm run dev
 | POST   | `/api/cameras`                       | Add an RTSP camera: `{name, url}`.        |
 | PATCH  | `/api/cameras/:id`                   | Update name/url/resolution/recording settings; restarts the camera's pipeline if it's running. |
 | POST   | `/api/cameras/discover`              | Re-scan for USB cameras.                  |
+| POST   | `/api/onvif/discover`                | Scan the LAN for ONVIF cameras (~3s), returns `[{address, xaddrs}]`. |
 | DELETE | `/api/cameras/:id`                   | Remove a camera.                          |
 | WS     | `/api/stream/:camera_id`             | WebRTC signaling for that camera's live preview. |
 | GET    | `/api/cameras/:id/recordings`        | List a camera's recorded segments.        |
