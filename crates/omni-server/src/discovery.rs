@@ -22,7 +22,17 @@ pub async fn auto_discover_usb_cameras(db: &Db) {
             }
         }
 
-        let camera = omni_core::Camera::new_usb(dev.name.clone(), dev.path.clone());
+        match db.is_usb_device_ignored(&dev.path).await {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(%err, device = %dev.path, "failed checking ignored-device list");
+                continue;
+            }
+        }
+
+        let mut camera = omni_core::Camera::new_usb(dev.name.clone(), dev.path.clone());
+        camera.sort_order = db.next_sort_order().await.unwrap_or(0);
         match db.upsert_camera(&camera).await {
             Ok(()) => tracing::info!(name = %dev.name, path = %dev.path, "registered USB camera"),
             Err(err) => {

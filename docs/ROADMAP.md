@@ -231,6 +231,63 @@ being visible via `GET /api/cameras` to an already-authenticated admin
 `curl | sh` in `scripts/bootstrap.sh` (each tool's own official install
 method).
 
+## v0.9 - dashboard UX: reordering, rotation, zoom, USB device management - done
+
+Real-world usage feedback after installing v0.8.1 as an actual systemd
+service, in order of what shipped:
+
+- [x] `ufw` detection in `scripts/install.sh` - a default-deny firewall
+      silently blocks the web UI/RTSP even on the LAN, not just the open
+      internet, and nothing about installing OmniMonitor itself would
+      have failed to reveal that. Offers to run `ufw allow` for both
+      ports rather than doing it silently.
+- [x] Camera rotation (`Camera::rotation`, none/90°/180°/270°) via
+      GStreamer's `videoflip`, inserted right after `decodebin` before
+      the scale to the configured resolution - affects the live view,
+      recordings, and RTSP re-serve alike, not just the browser. Verified
+      the generated pipeline string for all four values against a real
+      camera.
+  - Found and fixed a real, separate bug while verifying this: the RTSP
+    server's per-camera mount point captures its `Camera` snapshot once
+    at registration and never refreshes it, so `PATCH /api/cameras/:id`
+    (rotation or *any* other setting) was invisible to RTSP clients
+    until the next full rescan happened to re-register every mount
+    point. `update_camera` now re-registers the mount after every
+    change - see `docs/ARCHITECTURE.md`.
+- [x] Manual dashboard ordering: drag-and-drop tiles, `sort_order` column
+      + `PUT /api/cameras/reorder` (validates the request is exactly the
+      current set of camera ids, rejecting a partial reorder that would
+      silently corrupt the rest). New cameras append after existing ones
+      rather than defaulting into position 0.
+- [x] Click a live tile to open it full-size (`ExpandedCameraModal`),
+      with scroll-to-zoom/drag-to-pan/double-click-to-reset on the
+      **live view only** - browser-side CSS transform, doesn't touch the
+      pipeline, recordings, or RTSP output.
+  - The WebRTC/trickle-ICE signaling logic (non-trivial, see
+    `docs/ARCHITECTURE.md`'s "Signaling protocol" section) was extracted
+    from `CameraTile` into a shared `webrtc-view.ts` module so the
+    expanded view didn't need a second copy of easy-to-get-subtly-wrong
+    connection logic.
+- [x] Permanently ignoring a USB device: deleting a USB camera used to
+      not stick - the next rescan (or server restart) just saw the
+      still-plugged-in device as unknown again and re-added it. Deleting
+      a USB camera now also records its device path in a new
+      `ignored_usb_devices` table, checked by auto-discovery; reversible
+      from "Ignored USB devices" in the sidebar. Verified live: delete →
+      rescan doesn't bring it back → un-ignore → rescan does.
+
+## Later / unscheduled (dashboard)
+
+- [ ] Recording timeline: a continuous scrubbable timeline (Protect-
+      style) instead of a flat list of segment files to download -
+      needs a timeline UI component and a backend way to map a clicked
+      time to the right segment + byte offset.
+- [ ] Camera tabs/groups for organization - needs a "group" concept in
+      the DB (not just a client-side filter) and group-management UI.
+- [ ] Status overview tab (all cameras' online/offline/USB-vs-network
+      status, no video) - needs the supervisor to expose per-camera
+      health beyond "is a viewer currently attached."
+
 ## Later / unscheduled
 
 - [ ] Apply camera settings changes (recording toggle, resolution, motion

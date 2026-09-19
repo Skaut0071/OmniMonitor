@@ -68,6 +68,24 @@ cp "$ROOT/packaging/omnimonitor.service" /etc/systemd/system/omnimonitor.service
 systemctl daemon-reload
 systemctl enable omnimonitor.service
 
+# A default-deny firewall (ufw's default policy) blocks the web UI and
+# RTSP server even on your own LAN, not just the open internet - easy to
+# miss since nothing about *installing* OmniMonitor fails, the ports
+# just silently don't answer. Ask before touching firewall rules rather
+# than opening them silently.
+if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+    echo
+    echo "ufw is active and will block ports 8090 (web UI) and 5544 (RTSP) by default,"
+    echo "including from other devices on your own LAN."
+    read -r -p "Allow them now with 'ufw allow'? [y/N] " answer
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+        ufw allow 8090/tcp comment "OmniMonitor web UI"
+        ufw allow 5544/tcp comment "OmniMonitor RTSP server"
+    else
+        echo "Skipped - run 'sudo ufw allow 8090/tcp' and 'sudo ufw allow 5544/tcp' yourself if needed."
+    fi
+fi
+
 # Re-running this script (e.g. after `git pull` + a rebuild to update)
 # should just apply the update, not leave the old binary running - if
 # the service was already active, restart it into what was just

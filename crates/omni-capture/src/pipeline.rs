@@ -177,6 +177,21 @@ pub struct PipelineConfig {
     pub bitrate: u32,
     pub recording: Option<RecordingSink>,
     pub motion: Option<MotionConfig>,
+    pub rotation: omni_core::Rotation,
+}
+
+/// `gst-plugins-good`'s `videoflip` `method` property for each rotation -
+/// applied right after `decodebin`, before the scale to the configured
+/// resolution, so the final output is always exactly the configured
+/// width/height with the rotated content inside it (matching how a
+/// camera physically mounted sideways/upside down should be corrected).
+fn videoflip_method(rotation: omni_core::Rotation) -> &'static str {
+    match rotation {
+        omni_core::Rotation::None => "identity",
+        omni_core::Rotation::Clockwise90 => "clockwise",
+        omni_core::Rotation::Rotate180 => "rotate-180",
+        omni_core::Rotation::CounterClockwise90 => "counterclockwise",
+    }
 }
 
 impl CaptureSession {
@@ -197,7 +212,7 @@ impl CaptureSession {
     /// the right depayloader/parser/decoder chain.
     pub fn start(config: PipelineConfig) -> Result<CaptureHandle, CaptureError> {
         let mut description = format!(
-            "{source} ! decodebin ! videoconvert ! videoscale ! videorate \
+            "{source} ! decodebin ! videoflip method={flip} ! videoconvert ! videoscale ! videorate \
              ! video/x-raw,width={width},height={height},framerate={fps}/1 \
              ! tee name=raw_tee \
              raw_tee. ! queue max-size-buffers=4 leaky=downstream \
@@ -206,6 +221,7 @@ impl CaptureSession {
              omni_tee. ! queue max-size-buffers=4 leaky=downstream \
                 ! appsink name=omni_sink emit-signals=true sync=false max-buffers=2 drop=true",
             source = config.source.gst_bin_description(),
+            flip = videoflip_method(config.rotation),
             width = config.width,
             height = config.height,
             fps = config.framerate,

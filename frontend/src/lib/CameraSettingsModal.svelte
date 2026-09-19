@@ -6,7 +6,7 @@
     validate_sensitivity,
     validate_webhook_url,
   } from "./wasm/omni_wasm.js";
-  import { updateCamera, type Camera, type RecordingTrigger } from "./api";
+  import { updateCamera, type Camera, type RecordingTrigger, type Rotation } from "./api";
 
   export let camera: Camera;
 
@@ -35,6 +35,8 @@
   let motionEnabled = camera.motion.enabled;
   let motionSensitivity = camera.motion.sensitivity;
   let webhookUrl = camera.motion.webhook_url ?? "";
+
+  let rotation: Rotation = camera.rotation;
 
   let ageEnabled = camera.recording.retention_max_age_secs != null;
   let ageValue = camera.recording.retention_max_age_secs
@@ -99,6 +101,7 @@
           sensitivity: motionSensitivity,
           webhook_url: trimmedWebhook || null,
         },
+        rotation,
       });
       dispatch("updated");
       dispatch("close");
@@ -190,6 +193,22 @@
         </div>
       {/if}
     {/if}
+
+    <hr />
+
+    <label>
+      Rotation
+      <select bind:value={rotation} disabled={!wasmReady}>
+        <option value="none">None</option>
+        <option value="clockwise90">90° clockwise</option>
+        <option value="rotate180">180°</option>
+        <option value="counter_clockwise90">90° counter-clockwise</option>
+      </select>
+    </label>
+    <p class="hint">
+      For a camera mounted sideways or upside down. Applied to the live view, recordings, and RTSP
+      alike - takes effect after saving, disconnecting anyone currently watching this camera.
+    </p>
 
     <hr />
 

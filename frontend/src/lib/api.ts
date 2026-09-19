@@ -14,6 +14,8 @@ export interface MotionSettings {
   webhook_url: string | null;
 }
 
+export type Rotation = "none" | "clockwise90" | "rotate180" | "counter_clockwise90";
+
 export interface Camera {
   id: string;
   name: string;
@@ -27,6 +29,8 @@ export interface Camera {
   codec: "vp8" | "h264";
   recording: RecordingSettings;
   motion: MotionSettings;
+  rotation: Rotation;
+  sort_order: number;
   status?: "idle" | "streaming" | "error";
 }
 
@@ -51,6 +55,7 @@ export interface UpdateCameraRequest {
   framerate?: number;
   recording?: RecordingSettings;
   motion?: MotionSettings;
+  rotation?: Rotation;
 }
 
 const BASE = "/api";
@@ -114,6 +119,41 @@ export async function deleteCamera(id: string): Promise<void> {
   const res = await fetch(`${BASE}/cameras/${id}`, { method: "DELETE" });
   if (!res.ok && res.status !== 204) {
     throw new Error(`failed to delete camera: ${res.status}`);
+  }
+}
+
+export async function reorderCameras(ids: string[]): Promise<void> {
+  const res = await fetch(`${BASE}/cameras/reorder`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `failed to reorder cameras: ${res.status}`);
+  }
+}
+
+export interface IgnoredUsbDevice {
+  device_path: string;
+}
+
+export async function listIgnoredUsbDevices(): Promise<IgnoredUsbDevice[]> {
+  return unwrap(
+    await fetch(`${BASE}/ignored-usb-devices`),
+    "failed to list ignored USB devices",
+  );
+}
+
+export async function unignoreUsbDevice(devicePath: string): Promise<void> {
+  const res = await fetch(`${BASE}/ignored-usb-devices/unignore`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ device_path: devicePath }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `failed to un-ignore device: ${res.status}`);
   }
 }
 

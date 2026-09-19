@@ -7,15 +7,16 @@ for a Ubiquiti-Protect-style dashboard UI/UX with **USB webcams treated as
 first-class cameras** - plug in a UVC camera over USB and it gets the same
 live-preview and recording pipeline a network/RTSP camera would.
 
-Status: **Alpha (v0.8.1)**. Live preview over WebRTC (trickle ICE),
-continuous or motion-triggered segmented recording with retention,
-motion detection with webhook alerts, single-account login with
-brute-force lockout, an authenticated RTSP server that re-serves every
-camera (USB included) to third-party NVR/VMS/player software, and ONVIF
-network-camera discovery all work end-to-end for USB *and* RTSP cameras
-(most WiFi/PoE IP cameras speak RTSP - that's the protocol this targets
-for network cameras). Installable as a systemd service (see below). See
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next and
+Status: **Alpha (v0.9)**. Live preview over WebRTC (trickle ICE, with
+click-to-expand and live-view zoom), drag-and-drop dashboard reordering,
+camera rotation, continuous or motion-triggered segmented recording with
+retention, motion detection with webhook alerts, single-account login
+with brute-force lockout, an authenticated RTSP server that re-serves
+every camera (USB included) to third-party NVR/VMS/player software, and
+ONVIF network-camera discovery all work end-to-end for USB *and* RTSP
+cameras (most WiFi/PoE IP cameras speak RTSP - that's the protocol this
+targets for network cameras). Installable as a systemd service (see
+below). See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how it's built and
 why.
 
@@ -140,11 +141,19 @@ you don't have to go find that in your router's DHCP client list.
 Click the gear icon on a camera tile to turn on recording (continuous, or
 only while motion is detected) and set a retention limit (max age and/or
 max total size), and to turn on motion detection/webhook alerts
-independently of recording. Click the record icon to browse/play back
-recordings and view the motion event log. Every camera is also available
-to any RTSP client at `rtsp://<host>:5544/<camera-id>` (its id from
-`GET /api/cameras`), authenticated with the RTSP credential above - try
-`ffplay rtsp://rtsp:<password>@<host>:5544/<camera-id>` or add it in VLC.
+independently of recording, and to rotate a camera mounted sideways or
+upside down. Click a live tile to open it full-size, with scroll to
+zoom and drag to pan (live view only - doesn't affect recordings).
+Drag tiles to reorder the dashboard. Click the record icon to browse/play
+back recordings and view the motion event log. Every camera is also
+available to any RTSP client at `rtsp://<host>:5544/<camera-id>` (its id
+from `GET /api/cameras`), authenticated with the RTSP credential above -
+try `ffplay rtsp://rtsp:<password>@<host>:5544/<camera-id>` or add it in
+VLC.
+
+Deleting a USB camera also stops it from being auto-detected again (e.g.
+if it's actually used for something else on this machine) - undo that
+from "Ignored USB devices" in the sidebar, then rescan.
 
 ### Running as a service, or updating an existing install
 
@@ -202,8 +211,11 @@ cd frontend && npm install && npm run dev
 | POST   | `/api/cameras`                       | Add an RTSP camera: `{name, url}`.        |
 | PATCH  | `/api/cameras/:id`                   | Update name/url/resolution/recording settings; restarts the camera's pipeline if it's running. |
 | POST   | `/api/cameras/discover`              | Re-scan for USB cameras.                  |
+| PUT    | `/api/cameras/reorder`               | `{ids: [uuid, ...]}` - full new dashboard order. |
 | POST   | `/api/onvif/discover`                | Scan the LAN for ONVIF cameras (~3s), returns `[{address, xaddrs}]`. |
-| DELETE | `/api/cameras/:id`                   | Remove a camera.                          |
+| GET    | `/api/ignored-usb-devices`           | List USB device paths excluded from auto-discovery. |
+| POST   | `/api/ignored-usb-devices/unignore`  | `{device_path}` - make a device eligible for discovery again. |
+| DELETE | `/api/cameras/:id`                   | Remove a camera (a USB camera is also added to the ignore list above). |
 | WS     | `/api/stream/:camera_id`             | WebRTC signaling for that camera's live preview. |
 | GET    | `/api/cameras/:id/recordings`        | List a camera's recorded segments.        |
 | GET    | `/api/recordings/:id/:filename`      | Download/stream a segment (Range-request/seekable). |

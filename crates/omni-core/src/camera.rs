@@ -22,6 +22,21 @@ pub enum StreamCodec {
     H264,
 }
 
+/// How far to rotate a camera's video before scaling to its configured
+/// resolution - for a camera physically mounted sideways or upside down.
+/// Applied in the capture pipeline itself (see `omni-capture::pipeline`),
+/// so it affects the live view, recordings, and the RTSP re-serve alike,
+/// not just what's displayed in the browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Rotation {
+    #[default]
+    None,
+    Clockwise90,
+    Rotate180,
+    CounterClockwise90,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CameraStatus {
@@ -118,6 +133,13 @@ pub struct Camera {
     pub recording: RecordingSettings,
     #[serde(default)]
     pub motion: MotionSettings,
+    #[serde(default)]
+    pub rotation: Rotation,
+    /// Lower sorts first in the dashboard grid; ties broken by creation
+    /// order. Only meaningful relative to other cameras' values - set via
+    /// `PUT /api/cameras/reorder`, not directly.
+    #[serde(default)]
+    pub sort_order: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<CameraStatus>,
 }
@@ -137,6 +159,8 @@ impl Camera {
             codec: StreamCodec::Vp8,
             recording: RecordingSettings::default(),
             motion: MotionSettings::default(),
+            rotation: Rotation::default(),
+            sort_order: 0,
             status: None,
         }
     }

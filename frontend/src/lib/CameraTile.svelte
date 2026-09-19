@@ -1,7 +1,8 @@
 <script lang="ts">
   import { createEventDispatcher, onDestroy, onMount } from "svelte";
   import type { Camera } from "./api";
-  import { getMotionStatus, streamWsUrl } from "./api";
+  import { getMotionStatus } from "./api";
+  import { connectCameraView, type CameraViewConnection } from "./webrtc-view";
 
   export let camera: Camera;
 
@@ -12,91 +13,20 @@
   let errorMessage = "";
   let motionActive = false;
 
-  let pc: RTCPeerConnection | null = null;
-  let ws: WebSocket | null = null;
+  let connection: CameraViewConnection | null = null;
   let motionPoll: ReturnType<typeof setInterval> | null = null;
 
-  async function connect() {
-    status = "connecting";
+  function connect() {
     errorMessage = "";
-
-    pc = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    connection = connectCameraView(camera.id, videoEl, {
+      onStatusChange: (s) => (status = s),
+      onError: (message) => (errorMessage = message),
     });
-    pc.addTransceiver("video", { direction: "recvonly" });
-
-    pc.ontrack = (event) => {
-      if (videoEl) {
-        videoEl.srcObject = event.streams[0];
-      }
-      status = "live";
-    };
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "ice_candidate", candidate: event.candidate.toJSON() }));
-      }
-    };
-
-    pc.onconnectionstatechange = () => {
-      if (!pc) return;
-      if (
-        pc.connectionState === "failed" ||
-        pc.connectionState === "disconnected" ||
-        pc.connectionState === "closed"
-      ) {
-        status = "error";
-        errorMessage = errorMessage || "connection lost";
-      }
-    };
-
-    ws = new WebSocket(streamWsUrl(camera.id));
-
-    ws.onmessage = async (event) => {
-      const msg = JSON.parse(event.data);
-      if (msg.type === "answer") {
-        try {
-          await pc?.setRemoteDescription({ type: "answer", sdp: msg.sdp });
-        } catch (e) {
-          status = "error";
-          errorMessage = (e as Error).message;
-        }
-      } else if (msg.type === "ice_candidate") {
-        try {
-          await pc?.addIceCandidate(msg.candidate);
-        } catch {
-          // A late/duplicate candidate after the connection already
-          // settled isn't worth surfacing as a tile error.
-        }
-      } else if (msg.type === "error") {
-        status = "error";
-        errorMessage = msg.message;
-      }
-    };
-
-    ws.onerror = () => {
-      status = "error";
-      errorMessage = errorMessage || "signaling connection failed";
-    };
-
-    ws.onopen = async () => {
-      if (!pc) return;
-      try {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        ws?.send(JSON.stringify({ type: "offer", sdp: pc.localDescription?.sdp }));
-      } catch (e) {
-        status = "error";
-        errorMessage = (e as Error).message;
-      }
-    };
   }
 
   function disconnect() {
-    ws?.close();
-    ws = null;
-    pc?.close();
-    pc = null;
+    connection?.disconnect();
+    connection = null;
   }
 
   function retry() {
@@ -145,11 +75,18 @@
       >
     </div>
   </div>
-  <div class="video-wrap">
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div
+    class="video-wrap"
+    class:expandable={status === "live"}
+    title={status === "live" ? "Click to expand" : undefined}
+    on:click={() => status === "live" && dispatch("expand")}
+  >
     <!-- svelte-ignore a11y-media-has-caption -->
     <video bind:this={videoEl} autoplay playsinline muted></video>
     {#if status !== "live"}
-      <div class="overlay">
+      <div class="overlay" on:click|stopPropagation>
         {#if status === "error"}
           <span>⚠ {errorMessage || "stream error"}</span>
           <button on:click={retry}>Retry</button>
@@ -244,6 +181,9 @@
     position: relative;
     background: #000;
     aspect-ratio: 16 / 9;
+  }
+  .video-wrap.expandable {
+    cursor: zoom-in;
   }
   video {
     width: 100%;

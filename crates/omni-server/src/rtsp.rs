@@ -98,8 +98,16 @@ impl RtspServer {
     }
 
     /// Adds (or replaces) a `/<camera-id>` mount point streaming that
-    /// camera's live VP8 feed. Safe to call again for the same camera
-    /// (e.g. after a settings change) - replaces the old factory.
+    /// camera's live VP8 feed. `camera` is captured by value into the new
+    /// factory's `media-configure` callback and reused for every future
+    /// RTSP session on this mount until it's replaced - it is **not**
+    /// re-fetched from the database per session. That's fine for a
+    /// mount's first viewer ever (which is also the first thing to
+    /// actually start the shared capture pipeline, using these settings),
+    /// but means any caller that changes a camera's settings must call
+    /// this again with the updated `Camera` for an RTSP client to ever
+    /// see them - see `routes::update_camera`, which does. Safe to call
+    /// again for the same camera; replaces the old factory.
     pub fn add_camera(self: &Arc<Self>, state: Arc<AppState>, camera: Camera) {
         let factory = gstreamer_rtsp_server::RTSPMediaFactory::new();
         // `is-live=true`/`do-timestamp=true`: this appsrc has no fixed

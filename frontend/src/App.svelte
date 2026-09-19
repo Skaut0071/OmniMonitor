@@ -7,7 +7,17 @@
   import Login from "./lib/Login.svelte";
   import ChangePasswordModal from "./lib/ChangePasswordModal.svelte";
   import RtspCredentialsModal from "./lib/RtspCredentialsModal.svelte";
-  import { listCameras, discoverCameras, deleteCamera, me, logout, type Camera } from "./lib/api";
+  import ExpandedCameraModal from "./lib/ExpandedCameraModal.svelte";
+  import IgnoredUsbDevicesModal from "./lib/IgnoredUsbDevicesModal.svelte";
+  import {
+    listCameras,
+    discoverCameras,
+    deleteCamera,
+    reorderCameras,
+    me,
+    logout,
+    type Camera,
+  } from "./lib/api";
 
   let authChecked = false;
   let username: string | null = null;
@@ -20,6 +30,8 @@
   let loadError = "";
   let settingsCamera: Camera | null = null;
   let recordingsCamera: Camera | null = null;
+  let expandedCamera: Camera | null = null;
+  let showIgnoredUsbDevices = false;
 
   async function refresh() {
     try {
@@ -43,6 +55,42 @@
   async function remove(id: string) {
     await deleteCamera(id);
     await refresh();
+  }
+
+  let draggedId: string | null = null;
+
+  function onDragStart(id: string) {
+    draggedId = id;
+  }
+
+  function onDragOver(e: DragEvent) {
+    // Required for `drop` to fire at all - browsers otherwise reject
+    // the element as a drop target.
+    e.preventDefault();
+  }
+
+  async function onDrop(targetId: string) {
+    if (draggedId === null || draggedId === targetId) {
+      draggedId = null;
+      return;
+    }
+    const fromIndex = cameras.findIndex((c) => c.id === draggedId);
+    const toIndex = cameras.findIndex((c) => c.id === targetId);
+    if (fromIndex === -1 || toIndex === -1) {
+      draggedId = null;
+      return;
+    }
+    const reordered = [...cameras];
+    const [moved] = reordered.splice(fromIndex, 1);
+    reordered.splice(toIndex, 0, moved);
+    cameras = reordered; // optimistic - reflects the drop immediately
+    draggedId = null;
+    try {
+      await reorderCameras(reordered.map((c) => c.id));
+    } catch (e) {
+      loadError = (e as Error).message;
+      await refresh(); // fall back to the server's actual order
+    }
   }
 
   async function checkAuth() {
@@ -81,6 +129,9 @@
       </nav>
       <div class="sidebar-footer">
         <button class="ghost" on:click={runDiscover}>Rescan USB cameras</button>
+        <button class="ghost" on:click={() => (showIgnoredUsbDevices = true)}
+          >Ignored USB devices</button
+        >
         <button class="primary" on:click={() => (showAddModal = true)}>+ Add camera</button>
         <div class="account">
           <span class="username">{username}</span>
@@ -111,12 +162,20 @@
       {:else}
         <div class="grid">
           {#each cameras as camera (camera.id)}
-            <div class="grid-item">
+            <div
+              class="grid-item"
+              class:dragging={draggedId === camera.id}
+              draggable="true"
+              on:dragstart={() => onDragStart(camera.id)}
+              on:dragover={onDragOver}
+              on:drop={() => onDrop(camera.id)}
+            >
               <CameraTile
                 {camera}
                 on:remove={() => remove(camera.id)}
                 on:settings={() => (settingsCamera = camera)}
                 on:recordings={() => (recordingsCamera = camera)}
+                on:expand={() => (expandedCamera = camera)}
               />
             </div>
           {/each}
@@ -147,6 +206,17 @@
 
   {#if showRtspCredentials}
     <RtspCredentialsModal on:close={() => (showRtspCredentials = false)} />
+  {/if}
+
+  {#if expandedCamera}
+    <ExpandedCameraModal camera={expandedCamera} on:close={() => (expandedCamera = null)} />
+  {/if}
+
+  {#if showIgnoredUsbDevices}
+    <IgnoredUsbDevicesModal
+      on:close={() => (showIgnoredUsbDevices = false)}
+      on:restored={runDiscover}
+    />
   {/if}
 {/if}
 
@@ -253,6 +323,12 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
     gap: 1rem;
+  }
+  .grid-item {
+    cursor: grab;
+  }
+  .grid-item.dragging {
+    opacity: 0.4;
   }
   .hint,
   .error {

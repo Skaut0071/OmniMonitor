@@ -9,6 +9,6 @@ pub mod validate;
 
 pub use camera::{
     Camera, CameraKind, CameraStatus, MotionEvent, MotionSettings, RecordingSettings,
-    RecordingTrigger, StreamCodec,
+    RecordingTrigger, Rotation, StreamCodec,
 };
 pub use config::AppConfig;

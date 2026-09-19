@@ -684,7 +684,71 @@ Reviewed and deliberately left as-is, with reasoning:
   tool's own officially documented install method, not a shortcut this
   project invented.
 
-## Known limitations / honest gaps in v0.8.1
+## Dashboard UX: rotation, reordering, zoom, USB device management (v0.9)
+
+- **Rotation** (`Camera::rotation`) is applied in the capture pipeline
+  itself via GStreamer's `videoflip`, inserted right after `decodebin`
+  and before the `videoscale` that fits the result to the camera's
+  configured width/height - so the final output is always exactly that
+  configured resolution with the rotated content inside it, and rotation
+  affects the live view, recordings, and the RTSP re-serve identically
+  (it's one shared pipeline, see "One shared pipeline per camera" above).
+  `videoflip`'s `method` property (`identity`/`clockwise`/`rotate-180`/
+  `counterclockwise`) maps directly from the four `Rotation` variants.
+
+  Verifying this surfaced a real, separate, pre-existing bug: the RTSP
+  server's `RTSPMediaFactory::connect_media_configure` callback closes
+  over the `Camera` value passed to `RtspServer::add_camera` **by value**
+  at registration time, and reuses that same snapshot for every future
+  RTSP session on that mount - it never re-fetches from the database.
+  `update_camera` (`PATCH /api/cameras/:id`) was updating the DB and the
+  in-memory `Supervisor` state correctly, but never told the RTSP server
+  about the change, so *any* settings change (not just rotation) was
+  invisible to RTSP clients connecting after the change, until something
+  else (e.g. `/api/cameras/discover`) happened to re-register every mount
+  point anyway. Fixed by having `update_camera` call
+  `state.rtsp_server.add_camera(...)` again after every update, same as
+  `create_camera`/`delete_camera`/`discover_cameras` already did.
+
+- **Manual dashboard ordering** (`Camera::sort_order`) is a plain integer
+  column, reassigned in one transaction by `Db::reorder_cameras` from the
+  full new id order the frontend's drag-and-drop produces -
+  `PUT /api/cameras/reorder` rejects (400) any request that isn't
+  exactly the current set of camera ids, so a partial/stale list can't
+  silently leave some cameras with a `sort_order` that no longer means
+  what the caller thought it meant. New cameras get
+  `Db::next_sort_order()` (max existing + 1) instead of defaulting to
+  `0`, so they append at the end of the grid instead of jumping to the
+  front of an already-reordered list.
+
+- **Click-to-expand + live-view zoom**: `ExpandedCameraModal` opens a
+  second, independent `Supervisor::acquire_viewer` slot for the same
+  camera (the shared-pipeline design means this is cheap - no second
+  device open or encode pass, same as two browser tabs already worked
+  before this). Zoom/pan is a CSS `transform: scale()/translate()` on
+  the `<video>` element, entirely browser-side - it doesn't touch the
+  pipeline, so it has no effect on recordings or the RTSP output, only
+  on what that one viewer happens to be looking at.
+
+  The WebRTC/trickle-ICE connection logic (non-trivial - see "Signaling
+  protocol" above) was extracted from `CameraTile` into
+  `frontend/src/lib/webrtc-view.ts` so `ExpandedCameraModal` could reuse
+  the exact same tested logic instead of a second copy that could drift.
+
+- **Permanently ignoring a USB device**: deleting a USB camera previously
+  didn't stick - `auto_discover_usb_cameras` runs on every restart and
+  via "Rescan USB cameras", and would just see the still-plugged-in
+  device as unknown again and re-add it, since `usb_camera_exists`
+  only checks the *current* `cameras` table. A new `ignored_usb_devices`
+  table (keyed by device path, same identity scheme USB cameras already
+  use) is checked alongside it; `delete_camera` inserts into it
+  automatically for a USB camera (an RTSP camera's deletion is already
+  permanent, since it's never auto-discovered in the first place).
+  Reversible from "Ignored USB devices" in the sidebar
+  (`Db::unignore_usb_device`) - the device becomes eligible for
+  discovery again but isn't re-added until the next actual rescan.
+
+## Known limitations / honest gaps in v0.9
 
 - **Single admin account and single RTSP credential, not
   per-camera or per-user permissions** - every camera's RTSP mount point

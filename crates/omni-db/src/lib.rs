@@ -8,7 +8,7 @@
 use anyhow::Result;
 use omni_core::{
     Camera, CameraKind, MotionEvent, MotionSettings, RecordingSettings, RecordingTrigger,
-    StreamCodec,
+    Rotation, StreamCodec,
 };
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
@@ -56,6 +56,8 @@ struct CameraRow {
     motion_enabled: bool,
     motion_sensitivity: i64,
     motion_webhook_url: Option<String>,
+    rotation: String,
+    sort_order: i64,
 }
 
 impl TryFrom<CameraRow> for Camera {
@@ -85,6 +87,13 @@ impl TryFrom<CameraRow> for Camera {
             "motion" => RecordingTrigger::Motion,
             other => anyhow::bail!("unknown recording trigger in db: {other}"),
         };
+        let rotation = match row.rotation.as_str() {
+            "none" => Rotation::None,
+            "clockwise90" => Rotation::Clockwise90,
+            "rotate180" => Rotation::Rotate180,
+            "counter_clockwise90" => Rotation::CounterClockwise90,
+            other => anyhow::bail!("unknown rotation in db: {other}"),
+        };
         Ok(Camera {
             id: Uuid::parse_str(&row.id)?,
             name: row.name,
@@ -106,6 +115,8 @@ impl TryFrom<CameraRow> for Camera {
                 sensitivity: row.motion_sensitivity as u8,
                 webhook_url: row.motion_webhook_url,
             },
+            rotation,
+            sort_order: row.sort_order,
             status: None,
         })
     }
@@ -227,6 +238,20 @@ impl Db {
         .execute(&self.pool)
         .await?;
 
+        // Devices the user has explicitly deleted and doesn't want
+        // auto-discovery to keep re-adding - see `ignore_usb_device`'s
+        // docs for why this needs to exist at all (deleting a USB
+        // camera's `cameras` row alone doesn't stick).
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS ignored_usb_devices (
+                device_path  TEXT PRIMARY KEY
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         // SQLite has no "ADD COLUMN IF NOT EXISTS", so each ALTER TABLE
         // below fails with "duplicate column name" once it's already been
         // applied to a given database file - that specific error is
@@ -243,6 +268,9 @@ impl Db {
             "ALTER TABLE cameras ADD COLUMN motion_enabled INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE cameras ADD COLUMN motion_sensitivity INTEGER NOT NULL DEFAULT 50",
             "ALTER TABLE cameras ADD COLUMN motion_webhook_url TEXT",
+            // v0.9: rotation and manual dashboard ordering.
+            "ALTER TABLE cameras ADD COLUMN rotation TEXT NOT NULL DEFAULT 'none'",
+            "ALTER TABLE cameras ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
         ] {
             if let Err(err) = sqlx::query(stmt).execute(&self.pool).await {
                 let msg = err.to_string();
@@ -256,10 +284,22 @@ impl Db {
     }
 
     pub async fn list_cameras(&self) -> Result<Vec<Camera>> {
-        let rows = sqlx::query_as::<_, CameraRow>("SELECT * FROM cameras ORDER BY created_at")
+        let rows =
+            sqlx::query_as::<_, CameraRow>("SELECT * FROM cameras ORDER BY sort_order, created_at")
             .fetch_all(&self.pool)
             .await?;
         rows.into_iter().map(Camera::try_from).collect()
+    }
+
+    /// A `sort_order` that puts a newly added camera after every existing
+    /// one, so it shows up at the end of the dashboard grid instead of
+    /// wherever its default `0` would happen to land relative to cameras
+    /// that have already been manually reordered.
+    pub async fn next_sort_order(&self) -> Result<i64> {
+        let row = sqlx::query("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM cameras")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.try_get::<i64, _>("next")?)
     }
 
     pub async fn get_camera(&self, id: Uuid) -> Result<Option<Camera>> {
@@ -283,15 +323,22 @@ impl Db {
             RecordingTrigger::Continuous => "continuous",
             RecordingTrigger::Motion => "motion",
         };
+        let rotation = match camera.rotation {
+            Rotation::None => "none",
+            Rotation::Clockwise90 => "clockwise90",
+            Rotation::Rotate180 => "rotate180",
+            Rotation::CounterClockwise90 => "counter_clockwise90",
+        };
         sqlx::query(
             r#"
             INSERT INTO cameras (
                 id, name, kind, device_path, rtsp_url, enabled, width, height, framerate, codec,
                 recording_enabled, recording_trigger, segment_seconds,
                 retention_max_age_secs, retention_max_size_bytes,
-                motion_enabled, motion_sensitivity, motion_webhook_url
+                motion_enabled, motion_sensitivity, motion_webhook_url,
+                rotation, sort_order
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 kind = excluded.kind,
@@ -309,7 +356,9 @@ impl Db {
                 retention_max_size_bytes = excluded.retention_max_size_bytes,
                 motion_enabled = excluded.motion_enabled,
                 motion_sensitivity = excluded.motion_sensitivity,
-                motion_webhook_url = excluded.motion_webhook_url
+                motion_webhook_url = excluded.motion_webhook_url,
+                rotation = excluded.rotation,
+                sort_order = excluded.sort_order
             "#,
         )
         .bind(camera.id.to_string())
@@ -330,8 +379,28 @@ impl Db {
         .bind(camera.motion.enabled)
         .bind(camera.motion.sensitivity as i64)
         .bind(&camera.motion.webhook_url)
+        .bind(rotation)
+        .bind(camera.sort_order)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Assigns sequential `sort_order` values (0, 1, 2, ...) to cameras in
+    /// `ordered_ids`, matching the order the caller wants them displayed
+    /// in - used by drag-and-drop reordering in the dashboard, which
+    /// naturally produces "here's the full new order" rather than a
+    /// single camera's new position.
+    pub async fn reorder_cameras(&self, ordered_ids: &[Uuid]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for (index, id) in ordered_ids.iter().enumerate() {
+            sqlx::query("UPDATE cameras SET sort_order = ? WHERE id = ?")
+                .bind(index as i64)
+                .bind(id.to_string())
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -357,6 +426,48 @@ impl Db {
             .await?;
         let count: i64 = row.try_get("c")?;
         Ok(count > 0)
+    }
+
+    /// Marks a USB device path as never to be auto-(re)discovered -
+    /// without this, deleting a USB camera from the UI doesn't stick:
+    /// `auto_discover_usb_cameras` runs on every server restart and via
+    /// "Rescan USB cameras", and would just see the still-plugged-in
+    /// device as unknown again and re-add it. Meant to be called
+    /// alongside `delete_camera` for a USB camera - e.g. one that's
+    /// actually used for something else on this machine and shouldn't be
+    /// managed by OmniMonitor at all.
+    pub async fn ignore_usb_device(&self, device_path: &str) -> Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO ignored_usb_devices (device_path) VALUES (?)")
+            .bind(device_path)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Reverses `ignore_usb_device` - the device is eligible for
+    /// auto-discovery again from the next rescan.
+    pub async fn unignore_usb_device(&self, device_path: &str) -> Result<()> {
+        sqlx::query("DELETE FROM ignored_usb_devices WHERE device_path = ?")
+            .bind(device_path)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn is_usb_device_ignored(&self, device_path: &str) -> Result<bool> {
+        let row = sqlx::query("SELECT COUNT(*) as c FROM ignored_usb_devices WHERE device_path = ?")
+            .bind(device_path)
+            .fetch_one(&self.pool)
+            .await?;
+        let count: i64 = row.try_get("c")?;
+        Ok(count > 0)
+    }
+
+    pub async fn list_ignored_usb_devices(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT device_path FROM ignored_usb_devices ORDER BY device_path")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(|r| Ok(r.try_get("device_path")?)).collect()
     }
 
     /// Opens a new motion event for a camera (motion just started).

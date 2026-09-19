@@ -164,6 +164,7 @@ impl Supervisor {
             bitrate: DEFAULT_BITRATE,
             recording,
             motion,
+            rotation: camera.rotation,
         }
     }
 

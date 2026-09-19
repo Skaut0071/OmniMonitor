@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use omni_core::{
     validate, Camera, CameraKind, MotionEvent, MotionSettings, RecordingSettings,
-    RecordingTrigger, StreamCodec,
+    RecordingTrigger, Rotation, StreamCodec,
 };
 
 use crate::auth;
@@ -31,7 +31,13 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/config", get(get_config))
         .route("/api/cameras", get(list_cameras).post(create_camera))
         .route("/api/cameras/discover", post(discover_cameras))
+        .route("/api/cameras/reorder", axum::routing::put(reorder_cameras))
         .route("/api/onvif/discover", post(discover_onvif))
+        .route("/api/ignored-usb-devices", get(list_ignored_usb_devices))
+        .route(
+            "/api/ignored-usb-devices/unignore",
+            post(unignore_usb_device),
+        )
         .route(
             "/api/cameras/:id",
             axum::routing::patch(update_camera).delete(delete_camera),
@@ -219,6 +225,43 @@ async fn discover_cameras(State(state): State<Arc<AppState>>) -> Json<Vec<Camera
     Json(cameras)
 }
 
+#[derive(Deserialize)]
+struct ReorderCamerasRequest {
+    /// Every camera's id, in the new display order. Rejected (400) if it
+    /// doesn't contain exactly the same set of ids as the ones that
+    /// currently exist - a partial list would leave the left-out cameras
+    /// with a stale `sort_order` relative to ones that did get reordered,
+    /// silently corrupting the intended order rather than failing loudly.
+    ids: Vec<Uuid>,
+}
+
+/// Drag-and-drop reordering in the dashboard: the frontend sends the
+/// full new order after a drop, and every camera's `sort_order` is
+/// reassigned to match it in one go (`Db::reorder_cameras`).
+async fn reorder_cameras(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ReorderCamerasRequest>,
+) -> Result<StatusCode, ApiError> {
+    let existing = state.db.list_cameras().await.map_err(internal_error)?;
+    let mut existing_ids: Vec<Uuid> = existing.iter().map(|c| c.id).collect();
+    let mut requested_ids = req.ids.clone();
+    existing_ids.sort();
+    requested_ids.sort();
+    if existing_ids != requested_ids {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "ids must be exactly the current set of camera ids".to_string(),
+        ));
+    }
+
+    state
+        .db
+        .reorder_cameras(&req.ids)
+        .await
+        .map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Probes the LAN for ONVIF network cameras (WS-Discovery multicast) and
 /// returns whatever answers within a few seconds - see
 /// `onvif_discovery` for why this stops at "here's an IP and device
@@ -246,6 +289,7 @@ async fn create_camera(
     validate::validate_camera_name(&req.name).map_err(bad_request)?;
     validate::validate_rtsp_url(&req.url).map_err(bad_request)?;
 
+    let sort_order = state.db.next_sort_order().await.map_err(internal_error)?;
     let camera = Camera {
         id: Uuid::new_v4(),
         name: req.name,
@@ -259,6 +303,8 @@ async fn create_camera(
         codec: StreamCodec::Vp8,
         recording: RecordingSettings::default(),
         motion: MotionSettings::default(),
+        rotation: Rotation::default(),
+        sort_order,
         status: None,
     };
 
@@ -306,6 +352,7 @@ struct UpdateCameraRequest {
     framerate: Option<u32>,
     recording: Option<UpdateRecordingRequest>,
     motion: Option<UpdateMotionRequest>,
+    rotation: Option<Rotation>,
 }
 
 async fn update_camera(
@@ -385,6 +432,10 @@ async fn update_camera(
         };
     }
 
+    if let Some(rotation) = req.rotation {
+        camera.rotation = rotation;
+    }
+
     state
         .db
         .upsert_camera(&camera)
@@ -403,6 +454,16 @@ async fn update_camera(
             .await
             .map_err(internal_error)?;
     }
+
+    // The RTSP server's per-camera mount point captures its own snapshot
+    // of the `Camera` at registration time (its `media-configure`
+    // callback only builds a fresh pipeline from it on that mount's
+    // *first* viewer since the last (re)registration - see
+    // `RtspServer::add_camera`'s docs) - without re-registering here,
+    // any settings change made through this endpoint would be invisible
+    // to RTSP clients until the next full `/api/cameras/discover` happened
+    // to re-register every mount point anyway.
+    state.rtsp_server.add_camera(Arc::clone(&state), camera.clone());
 
     Ok(Json(camera))
 }
@@ -433,13 +494,72 @@ async fn list_events(
     Ok(Json(events))
 }
 
+/// Deleting a USB camera also permanently excludes its device path from
+/// future auto-discovery (see `Db::ignore_usb_device`'s docs) - without
+/// this, the still-plugged-in device would just get silently re-added on
+/// the next rescan/restart, making "delete" not actually stick for USB
+/// cameras specifically. Reversible from "Ignored USB devices" in the
+/// sidebar. RTSP cameras don't need this: they're never auto-discovered
+/// in the first place, so deleting one is already permanent.
 async fn delete_camera(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
+    let camera = state.db.get_camera(id).await.map_err(internal_error)?;
     state.supervisor.stop(id).await;
     state.rtsp_server.remove_camera(id);
     state.db.delete_camera(id).await.map_err(internal_error)?;
+    if let Some(Camera {
+        kind: CameraKind::Usb { device_path },
+        ..
+    }) = camera
+    {
+        state
+            .db
+            .ignore_usb_device(&device_path)
+            .await
+            .map_err(internal_error)?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+struct IgnoredUsbDevice {
+    device_path: String,
+}
+
+async fn list_ignored_usb_devices(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<IgnoredUsbDevice>>, ApiError> {
+    let devices = state
+        .db
+        .list_ignored_usb_devices()
+        .await
+        .map_err(internal_error)?
+        .into_iter()
+        .map(|device_path| IgnoredUsbDevice { device_path })
+        .collect();
+    Ok(Json(devices))
+}
+
+#[derive(Deserialize)]
+struct UnignoreUsbDeviceRequest {
+    device_path: String,
+}
+
+/// Reverses deleting a USB camera - the device becomes eligible for
+/// auto-discovery again on the next rescan (it doesn't reappear
+/// immediately on its own; call `POST /api/cameras/discover` afterward,
+/// which the sidebar's "Rescan USB cameras" button already does).
+async fn unignore_usb_device(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UnignoreUsbDeviceRequest>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .db
+        .unignore_usb_device(&req.device_path)
+        .await
+        .map_err(internal_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
