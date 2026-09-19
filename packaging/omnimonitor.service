@@ -1,0 +1,38 @@
+[Unit]
+Description=OmniMonitor NVR
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=omnimonitor
+Group=omnimonitor
+# USB camera device nodes (/dev/videoN) are owned by group "video" on
+# Debian/Ubuntu - the service account needs to be a member of it (the
+# install script handles this), and this makes sure the group is active
+# for this process even if group membership was granted after login.
+SupplementaryGroups=video
+
+Environment=OMNI_DATA_DIR=/var/lib/omnimonitor
+Environment=OMNI_FRONTEND_DIST=/opt/omnimonitor/frontend/dist
+# Uncomment to pick a fixed admin/RTSP password instead of the
+# random-and-printed-once default (see README.md):
+# Environment=OMNI_ADMIN_PASSWORD=changeme
+# Environment=OMNI_RTSP_PASSWORD=changeme
+
+WorkingDirectory=/var/lib/omnimonitor
+ExecStart=/opt/omnimonitor/bin/omni-server
+Restart=on-failure
+RestartSec=2
+
+# Sandboxing: this service only needs to read its own install directory,
+# read/write its own data directory, and open V4L2/network devices -
+# nothing else on the system.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/omnimonitor
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

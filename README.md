@@ -1,17 +1,20 @@
 # OmniMonitor
 
+[![CI](https://github.com/Skaut0071/OmniMonitor/actions/workflows/ci.yml/badge.svg)](https://github.com/Skaut0071/OmniMonitor/actions/workflows/ci.yml)
+
 An open-source, self-hosted NVR (Network Video Recorder) for Linux, aiming
 for a Ubiquiti-Protect-style dashboard UI/UX with **USB webcams treated as
 first-class cameras** - plug in a UVC camera over USB and it gets the same
 live-preview and recording pipeline a network/RTSP camera would.
 
-Status: **early (v0.7)**. Live preview over WebRTC (trickle ICE),
+Status: **Alpha (v0.8)**. Live preview over WebRTC (trickle ICE),
 continuous or motion-triggered segmented recording with retention,
-motion detection with webhook alerts, single-account login, an
-authenticated RTSP server that re-serves every camera (USB included) to
-third-party NVR/VMS/player software, and ONVIF network-camera discovery
-all work end-to-end for USB *and* RTSP cameras (most WiFi/PoE IP cameras
-speak RTSP - that's the protocol this targets for network cameras). See
+motion detection with webhook alerts, single-account login with
+brute-force lockout, an authenticated RTSP server that re-serves every
+camera (USB included) to third-party NVR/VMS/player software, and ONVIF
+network-camera discovery all work end-to-end for USB *and* RTSP cameras
+(most WiFi/PoE IP cameras speak RTSP - that's the protocol this targets
+for network cameras). Installable as a systemd service (see below). See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how it's built and
 why.
@@ -100,6 +103,26 @@ to any RTSP client at `rtsp://<host>:5544/<camera-id>` (its id from
 `GET /api/cameras`), authenticated with the RTSP credential above - try
 `ffplay rtsp://rtsp:<password>@<host>:5544/<camera-id>` or add it in VLC.
 
+### Running as a service (recommended for actual deployment)
+
+The steps above run OmniMonitor directly in a terminal - fine for trying
+it out, but it won't survive a reboot or a crash. To install it as a
+systemd service (dedicated system user, runs under `/opt/omnimonitor` +
+`/var/lib/omnimonitor`, restarts on failure):
+
+```bash
+./scripts/build-all.sh
+sudo ./scripts/install.sh
+sudo systemctl start omnimonitor
+sudo journalctl -u omnimonitor -f   # watch for the first-boot passwords
+```
+
+See `packaging/omnimonitor.service` for the unit file (also where
+`OMNI_ADMIN_PASSWORD`/`OMNI_RTSP_PASSWORD` would go if you want to set
+them instead of using the printed-once random ones) and re-run
+`sudo systemctl daemon-reload && sudo systemctl restart omnimonitor`
+after editing it.
+
 ### Development loop
 
 ```bash
@@ -137,14 +160,24 @@ cd frontend && npm install && npm run dev
 Every endpoint above `/api/auth/login` requires a valid session cookie
 (set by logging in) - see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#authentication).
 
-## Why no HTTPS by default?
+## HTTPS
 
 Deliberate choice for early versions: the server speaks plain HTTP on
-8090. If you need TLS, put a reverse proxy in front of it or use your own
-port-forwarding/tunnel setup. There's a login (see above) and the RTSP
-port (5544) now requires its own credential too, but both are still a
-single account/secret with no rate limiting and no encryption on the
-wire - don't expose either to the open internet as-is.
+8090 - no TLS built in. If you need TLS, put a reverse proxy in front of
+it: see `packaging/Caddyfile.example` (gets you a free auto-renewing
+Let's Encrypt certificate just from a real DNS name) or
+`packaging/nginx.conf.example` (bring your own certificate). Login
+attempts are now rate-limited (exponential backoff per source IP after 3
+failures, see `docs/ARCHITECTURE.md#authentication`), but it's still a
+single admin account and the RTSP credential (port 5544) is a single
+shared secret with no rate limiting of its own - don't expose either
+past a reverse proxy (or a VPN/port-forward you trust) without
+understanding that.
+
+Only the web UI (port 8090) can go through an HTTP(S) reverse proxy this
+way - the RTSP server (port 5544) isn't HTTP, so it needs a TLS-capable
+TCP proxy (e.g. `stunnel`) or a VPN if you need it reachable outside your
+LAN at all.
 
 ## License
 

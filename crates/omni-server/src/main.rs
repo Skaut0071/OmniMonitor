@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
 
     omni_capture::init()?;
 
-    let config = AppConfig::default();
+    let config = AppConfig::from_env();
     std::fs::create_dir_all(config.recordings_dir())?;
     let db = Db::connect(&config.db_path()).await?;
     auth::bootstrap_admin(&db).await?;
@@ -63,6 +63,11 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(retention::run(db.clone(), PathBuf::from(&config.data_dir)));
     tokio::spawn(auth::run_session_sweeper(db.clone()));
 
+    let login_rate_limiter = Arc::new(auth::LoginRateLimiter::new());
+    tokio::spawn(auth::run_login_rate_limiter_sweeper(Arc::clone(
+        &login_rate_limiter,
+    )));
+
     let rtsp_server = RtspServer::start(config.rtsp_port, &rtsp_username, &rtsp_password);
 
     let state = Arc::new(AppState {
@@ -70,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
         supervisor,
         rtsp_server,
+        login_rate_limiter,
     });
 
     // Every camera gets an RTSP mount point at /<camera-id>, regardless
@@ -98,6 +104,10 @@ async fn main() -> anyhow::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], config.http_port));
     tracing::info!(%addr, "OmniMonitor listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

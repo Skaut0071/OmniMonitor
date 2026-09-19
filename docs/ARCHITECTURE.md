@@ -487,26 +487,47 @@ future work). `omni-server::auth`:
   by the validity check on every request, the periodic sweep just
   reclaims the row.
 
+### Login rate limiting (v0.8)
+
+`auth::LoginRateLimiter` throttles `/api/auth/login` per source IP -
+the only endpoint reachable without a session, so the only one worth
+protecting this way. The first 3 failures from an IP are free (typos
+happen); each failure after that locks that IP out for `2^n` seconds
+(2, 4, 8, ... capped at 5 minutes), reset immediately on a successful
+login. An in-memory `HashMap<IpAddr, _>` behind a `Mutex` - no
+persistence needed, a restart clearing everyone's lockout state is an
+acceptable tradeoff for a single-process app, and a background sweep
+(hourly) forgets entries idle for over an hour so the map doesn't grow
+unbounded against a scanner hitting many distinct source addresses.
+
+The IP comes from `axum::extract::ConnectInfo`, wired in by starting the
+server with `into_make_service_with_connect_info::<SocketAddr>()` -
+which means it's the **TCP peer address**, not necessarily the real
+client if OmniMonitor runs behind a reverse proxy (see "HTTPS" below):
+in that setup every request looks like it comes from the proxy, so the
+limiter's per-IP tracking degrades to "shared across everyone behind
+it." Verified end-to-end against a live server: repeated wrong passwords
+correctly return `429` with an increasing retry-after, and a correct
+password is accepted immediately once the lockout window elapses.
+
 ## HTTPS
 
-Deliberately out of scope for early versions, per project decision: the
-server is plain HTTP on port 8090. If you need TLS, put a reverse proxy
-(Caddy, nginx, Tailscale, etc.) in front of it, or port-forward with your
-own certificate termination. This keeps local/LAN setup friction-free,
-which matters more than TLS for a device where the HTTP login is
-itself unauthenticated-by-default over the wire (a plain cookie, no
-encryption) and RTSP Basic auth (see above) sends credentials in
-base64, not encrypted.
+Deliberately out of scope for the server itself, per project decision:
+it's plain HTTP on port 8090, no TLS built in. `packaging/` ships
+ready-to-edit reverse-proxy configs (`Caddyfile.example`,
+`nginx.conf.example`) instead - Caddy gets a Let's Encrypt certificate
+automatically from a real DNS name, nginx expects you (or `certbot`) to
+provide one. This keeps local/LAN setup friction-free, which matters
+more than TLS for a device most people run on a trusted network; put a
+reverse proxy in front of it (or a VPN/tunnel) the moment that stops
+being true. Only the HTTP API/UI can go through an HTTP(S) reverse proxy
+this way - the RTSP server (5544, see above) isn't HTTP, so exposing it
+past a LAN needs a TLS-capable TCP proxy (`stunnel`) or a VPN instead.
 
-## Known limitations / honest gaps in v0.5.1
+## Known limitations / honest gaps in v0.8
 
-- **Single account, no rate limiting on login, no lockout after repeated
-  failures.** Anyone who can reach port 8090 can attempt to log in; a
-  successful session then has full access to view, reconfigure, and
-  delete recordings for every camera. Fine on a trusted LAN, not
-  something to expose to the open internet as-is.
-- **The RTSP server (port 5544) has a single shared credential, not
-  per-camera or per-user permissions** - every camera's mount point
+- **Single admin account and single RTSP credential, not
+  per-camera or per-user permissions** - every camera's RTSP mount point
   grants the same "user" role to the same Basic-auth credential. Good
   enough to keep it off a trusted LAN's uninvited guests; not
   fine-grained, and Basic auth over RTSP isn't encrypted (see "HTTPS"

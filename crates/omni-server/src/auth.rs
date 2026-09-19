@@ -17,7 +17,10 @@ use axum::middleware::Next;
 use axum::response::Response;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::state::AppState;
 
@@ -50,6 +53,102 @@ pub fn generate_token() -> String {
         .take(48)
         .map(char::from)
         .collect()
+}
+
+struct LoginAttempts {
+    failures: u32,
+    locked_until: Option<Instant>,
+    last_activity: Instant,
+}
+
+/// Per-IP exponential backoff on failed logins - `/api/auth/login` is the
+/// only endpoint reachable without a session, so it's the only one worth
+/// throttling. The first 3 failures from an IP are free (typos happen);
+/// each one after that locks that IP out for `2^n` seconds, capped at 5
+/// minutes, reset on a successful login.
+///
+/// Keyed by the TCP peer address (`axum::extract::ConnectInfo`), which is
+/// the reverse proxy's address if OmniMonitor is run behind one rather
+/// than the real client's - see the "HTTPS" docs for why a reverse proxy
+/// is the recommended way to expose this past a LAN, and note that this
+/// limiter's per-IP tracking degrades to "shared across everyone behind
+/// that proxy" in that setup, same as most single-node rate limiters.
+pub struct LoginRateLimiter {
+    attempts: Mutex<HashMap<IpAddr, LoginAttempts>>,
+}
+
+const FREE_ATTEMPTS: u32 = 3;
+const MAX_LOCKOUT: Duration = Duration::from_secs(300);
+/// Sweep interval and per-IP idle threshold for forgetting stale entries,
+/// so a long-running server's map doesn't grow forever from scanners
+/// hitting many distinct source addresses once each.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
+const IDLE_FORGET_AFTER: Duration = Duration::from_secs(3600);
+
+impl LoginRateLimiter {
+    pub fn new() -> Self {
+        Self {
+            attempts: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Returns `Err(seconds_remaining)` if `ip` is currently locked out.
+    pub fn check(&self, ip: IpAddr) -> Result<(), u64> {
+        let attempts = self.attempts.lock().expect("lock poisoned");
+        let Some(entry) = attempts.get(&ip) else {
+            return Ok(());
+        };
+        let Some(until) = entry.locked_until else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        if now >= until {
+            return Ok(());
+        }
+        Err((until - now).as_secs().max(1))
+    }
+
+    pub fn record_failure(&self, ip: IpAddr) {
+        let mut attempts = self.attempts.lock().expect("lock poisoned");
+        let entry = attempts.entry(ip).or_insert(LoginAttempts {
+            failures: 0,
+            locked_until: None,
+            last_activity: Instant::now(),
+        });
+        entry.failures += 1;
+        entry.last_activity = Instant::now();
+        if entry.failures > FREE_ATTEMPTS {
+            let exponent = (entry.failures - FREE_ATTEMPTS).min(10);
+            let secs = 2u64.saturating_pow(exponent).min(MAX_LOCKOUT.as_secs());
+            entry.locked_until = Some(Instant::now() + Duration::from_secs(secs));
+        }
+    }
+
+    pub fn record_success(&self, ip: IpAddr) {
+        self.attempts.lock().expect("lock poisoned").remove(&ip);
+    }
+
+    fn sweep(&self) {
+        let cutoff = Instant::now() - IDLE_FORGET_AFTER;
+        self.attempts
+            .lock()
+            .expect("lock poisoned")
+            .retain(|_, entry| entry.last_activity > cutoff);
+    }
+}
+
+impl Default for LoginRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub async fn run_login_rate_limiter_sweeper(limiter: Arc<LoginRateLimiter>) {
+    let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
+    loop {
+        ticker.tick().await;
+        limiter.sweep();
+    }
 }
 
 /// Ensures an admin account exists. If one doesn't, creates it with

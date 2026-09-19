@@ -1,0 +1,30 @@
+# Example Caddy config for putting OmniMonitor behind HTTPS.
+#
+# Caddy gets you free, auto-renewing Let's Encrypt certificates just by
+# having a real DNS name pointing at this machine - no manual cert setup.
+# Copy this to /etc/caddy/Caddyfile (replacing the existing site block,
+# if any), edit the domain, then:
+#
+#   sudo systemctl reload caddy
+#
+# `reverse_proxy` already forwards the Upgrade/Connection headers
+# WebSocket signaling (/api/stream/:camera_id) needs - no extra config
+# required, unlike nginx.
+#
+# Note: only the web UI (port 8090) goes through this. The RTSP server
+# (port 5544) isn't HTTP and can't be proxied this way - if you need it
+# reachable outside your LAN, use a TLS-terminating TCP proxy (e.g.
+# stunnel) or a VPN (Tailscale/WireGuard) instead, and keep in mind RTSP
+# clients also need to reach it directly (see docs/ARCHITECTURE.md).
+
+your-domain.example.com {
+	reverse_proxy 127.0.0.1:8090
+}
+
+# No public DNS name yet? Caddy can still serve a self-signed cert for
+# local testing:
+#
+# https://192.168.1.10 {
+# 	tls internal
+# 	reverse_proxy 127.0.0.1:8090
+# }

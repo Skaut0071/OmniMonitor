@@ -1,6 +1,7 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{Path, Request, State};
+use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -65,14 +66,26 @@ struct LoginRequest {
 
 async fn auth_login(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
+    let ip = peer.ip();
+    if let Err(retry_after_secs) = state.login_rate_limiter.check(ip) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("too many failed login attempts - try again in {retry_after_secs}s"),
+        ));
+    }
+
     let Some((username, hash)) = state.db.admin_user().await.map_err(internal_error)? else {
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "no admin account configured".to_string()));
     };
     if req.username != username || !auth::verify_password(&req.password, &hash) {
+        state.login_rate_limiter.record_failure(ip);
         return Err((StatusCode::UNAUTHORIZED, "invalid username or password".to_string()));
     }
+    state.login_rate_limiter.record_success(ip);
+
     let token = auth::generate_token();
     state
         .db

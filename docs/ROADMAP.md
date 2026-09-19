@@ -135,6 +135,32 @@ order the project intends to tackle things.
       logic against real-world WS-Discovery reply shapes (varying
       namespace prefixes, multiple space-separated XAddrs).
 
+## v0.8 - Alpha: packaging, HTTPS docs, CI, login rate limiting - done
+
+- [x] Systemd packaging: `packaging/omnimonitor.service` (dedicated
+      system user, sandboxed with `ProtectSystem=strict` etc.) plus
+      `scripts/install.sh` to set it up end-to-end (creates the system
+      user, adds it to `video` for USB camera access, installs to
+      `/opt/omnimonitor` + `/var/lib/omnimonitor`, enables the unit).
+- [x] `AppConfig::from_env()` (`OMNI_HTTP_PORT`/`OMNI_RTSP_PORT`/
+      `OMNI_DATA_DIR`), needed so the service isn't tied to a relative
+      `./data` path that only makes sense from a dev checkout's working
+      directory.
+- [x] Reverse-proxy HTTPS recipes: `packaging/Caddyfile.example`
+      (automatic Let's Encrypt) and `packaging/nginx.conf.example`
+      (bring your own certificate, includes the WebSocket upgrade
+      headers `/api/stream/:camera_id` needs).
+- [x] CI (`.github/workflows/ci.yml`): backend build + clippy
+      (`-D warnings`) + test, and frontend wasm build + `svelte-check` +
+      `vite build`, on every push/PR. Caught and fixed a real
+      pre-existing type error in `RtspCredentialsModal.svelte` that
+      `npm run build` alone hadn't (nullable `creds` used directly in
+      markup instead of narrowed local variables).
+- [x] Login rate limiting: exponential backoff per source IP on
+      `/api/auth/login` after 3 free failures, capped at a 5-minute
+      lockout, reset on success (`auth::LoginRateLimiter`). Verified
+      against a live server end-to-end (see `docs/ARCHITECTURE.md`).
+
 ## Later / unscheduled
 
 - [ ] Apply camera settings changes (recording toggle, resolution, motion

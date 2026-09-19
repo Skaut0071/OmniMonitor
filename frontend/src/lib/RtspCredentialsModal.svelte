@@ -8,6 +8,12 @@
   let error = "";
   let copied = "";
 
+  // Plain strings (not the nullable `creds` itself) so the markup below
+  // - which only renders once `creds` is truthy anyway - doesn't have to
+  // fight TypeScript's null-narrowing across template expressions.
+  $: username = creds?.username ?? "";
+  $: password = creds?.password ?? "";
+
   onMount(async () => {
     try {
       creds = await getRtspCredentials();
@@ -61,8 +67,8 @@
       <label>
         Username
         <div class="row">
-          <input readonly value={creds.username} />
-          <button class="ghost" on:click={() => copy(creds.username, "username")}>
+          <input readonly value={username} />
+          <button class="ghost" on:click={() => copy(username, "username")}>
             {copied === "username" ? "Copied" : "Copy"}
           </button>
         </div>
@@ -70,8 +76,8 @@
       <label>
         Password
         <div class="row">
-          <input readonly value={creds.password} />
-          <button class="ghost" on:click={() => copy(creds.password, "password")}>
+          <input readonly value={password} />
+          <button class="ghost" on:click={() => copy(password, "password")}>
             {copied === "password" ? "Copied" : "Copy"}
           </button>
         </div>
