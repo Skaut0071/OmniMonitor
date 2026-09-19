@@ -660,10 +660,24 @@ what it rated most severe:
   @system-service`. Deliberately does **not** add `PrivateDevices=true`
   (a common hardening suggestion) - that blocks all of `/dev`, including
   the `/dev/videoN` nodes USB capture depends on, which would silently
-  break the core feature. These flags were reasoned about from what the
-  service actually needs, not verified against a live systemd instance
-  in this session - run `systemd-analyze security omnimonitor` after
-  installing to check.
+  break the core feature.
+  - These flags were reasoned about from what the service needs, not
+    verified against a live systemd instance when first written - and
+    that gap turned up a real bug once someone actually ran it:
+    `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6` (no `AF_NETLINK`)
+    made every WebRTC live view hang at "connecting" forever. SDP
+    negotiation succeeded, but `webrtc-rs`'s ICE agent enumerates local
+    network interfaces via `getifaddrs()` to gather host candidates,
+    which talks to the kernel over an `AF_NETLINK` socket under the hood
+    on Linux - blocked, every such `socket()` call fails with
+    `EAFNOSUPPORT` (errno 97), and ICE gathers zero local candidates.
+    Diagnosed from `journalctl -u omnimonitor` showing "Address family
+    not supported by protocol (os error 97)" during candidate gathering,
+    with `RestrictAddressFamilies` the only thing in the unit that could
+    produce that specific error for a syscall the unsandboxed dev binary
+    made successfully every time. Fixed by adding `AF_NETLINK` to the
+    allow-list. Run `systemd-analyze security omnimonitor` after
+    installing to sanity-check the rest of these.
 
 Reviewed and deliberately left as-is, with reasoning:
 

@@ -32,16 +32,28 @@ RestartSec=2
 # that would block access to /dev/videoN along with everything else
 # under /dev, breaking USB camera capture entirely - the option some
 # hardening guides suggest by default isn't safe to apply blindly here.
-# Verify with `systemd-analyze security omnimonitor` after installing -
-# these flags weren't exercised against a real systemd instance while
-# writing this unit, only reasoned about from what the service actually
-# needs to do.
+#
+# AF_NETLINK is required, not just the obvious AF_INET/AF_INET6/AF_UNIX:
+# found by actually running this unit and hitting it. webrtc-rs's ICE
+# agent enumerates local network interfaces (to gather host candidates)
+# via getifaddrs(), which talks to the kernel over an AF_NETLINK socket
+# under the hood on Linux even though nothing about "list my network
+# interfaces" looks netlink-specific from the calling code. Without it,
+# every socket() call for that enumeration fails with EAFNOSUPPORT
+# (errno 97, logged as "Address family not supported by protocol") and
+# ICE gathers zero local candidates - so every WebRTC live view hangs at
+# "connecting" forever, correctly negotiating SDP but never actually
+# reaching a connected media path. Confirmed via `journalctl -u
+# omnimonitor`: the exact "Address family not supported by protocol (os
+# error 97)" during ICE candidate gathering, with `RestrictAddressFamilies`
+# as the only thing in this unit that could produce that specific error
+# for a syscall the unsandboxed dev binary made successfully every time.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/omnimonitor
 PrivateTmp=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
