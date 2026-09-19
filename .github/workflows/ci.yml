@@ -77,6 +77,15 @@ jobs:
 
   audit:
     runs-on: ubuntu-latest
+    # rustsec/audit-check reports its results as a GitHub Check Run, which
+    # needs `checks: write` on the token - the default GITHUB_TOKEN is
+    # read-only for that unless a job explicitly asks for more (found by
+    # the first real run of this job: the audit itself passed with zero
+    # vulnerabilities, but the job still failed on "Resource not
+    # accessible by integration" trying to publish that result).
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       # Checks Cargo.lock against the RustSec advisory database for
