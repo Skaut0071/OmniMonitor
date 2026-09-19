@@ -38,6 +38,19 @@ pub enum CaptureSource {
 }
 
 impl CaptureSource {
+    /// Note this deliberately never interpolates a camera-supplied RTSP
+    /// URL into the returned string: `gst::parse::launch` parses that
+    /// string with gst-launch syntax, so a URL containing a `"` (or other
+    /// launch-syntax metacharacters) would otherwise let a value that's
+    /// only supposed to be a `location` property break out and append
+    /// arbitrary pipeline elements (e.g. `filesink` to write files as the
+    /// service user) - `validate_rtsp_url` only checks for an `rtsp://`
+    /// prefix, not the absence of those characters, so this can't rely on
+    /// validation alone. The RTSP source instead gets a bare, unparsed
+    /// name here; `CaptureSession::start` looks the element up by that
+    /// name after parsing and sets `location` as a typed GObject property
+    /// (`set_property`, not string formatting), which goes straight to
+    /// the property setter with no further parsing of its contents.
     fn gst_bin_description(&self) -> String {
         match self {
             CaptureSource::Usb { device_path } => {
@@ -47,8 +60,8 @@ impl CaptureSource {
             // for a camera reachable over a WiFi LAN or through a NAT/
             // firewall, where the UDP ports rtspsrc would otherwise pick
             // are very likely to get blocked or dropped.
-            CaptureSource::Rtsp { url } => {
-                format!("rtspsrc location=\"{url}\" latency=200 protocols=tcp")
+            CaptureSource::Rtsp { .. } => {
+                "rtspsrc name=omni_rtsp_src latency=200 protocols=tcp".to_string()
             }
         }
     }
@@ -252,6 +265,17 @@ impl CaptureSession {
         let pipeline = element
             .downcast::<gst::Pipeline>()
             .map_err(|_| CaptureError::Build("parsed element graph is not a Pipeline".into()))?;
+
+        // See `CaptureSource::gst_bin_description`'s docs: the URL is set
+        // as a property here, never formatted into the launch string, so
+        // it can't be interpreted as gst-launch syntax no matter what
+        // characters it contains.
+        if let CaptureSource::Rtsp { url } = &config.source {
+            let rtspsrc = pipeline
+                .by_name("omni_rtsp_src")
+                .ok_or_else(|| CaptureError::Build("rtspsrc 'omni_rtsp_src' not found".into()))?;
+            rtspsrc.set_property("location", url);
+        }
 
         let appsink = pipeline
             .by_name("omni_sink")

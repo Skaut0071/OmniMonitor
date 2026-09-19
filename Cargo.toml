@@ -37,13 +37,23 @@ gstreamer-rtsp-server = "0.23"
 
 webrtc = "0.11"
 
-sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
+# `default-features = false`: sqlx's defaults pull in the MySQL and
+# Postgres drivers too, which this project has never used (SQLite is
+# the only driver - see docs/ARCHITECTURE.md for why) - no reason to
+# compile or ship the others. `0.8` (not `0.7`) because RUSTSEC-2024-0363
+# (a sqlx wire-protocol decoding bug) is fixed there; even though that
+# advisory is specifically in the MySQL/Postgres decoders this project
+# doesn't compile, `cargo audit` flags it by crate version regardless of
+# which features are active, so staying on a version with a real fix is
+# both the correct and the simplest resolution.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "uuid", "macros"] }
 
 v4l = "0.14"
 
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 argon2 = "0.5"
 rand = "0.8"
+sha2 = "0.10"
 
 omni-core = { path = "crates/omni-core" }
 omni-db = { path = "crates/omni-db" }

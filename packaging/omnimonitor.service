@@ -26,13 +26,32 @@ Restart=on-failure
 RestartSec=2
 
 # Sandboxing: this service only needs to read its own install directory,
-# read/write its own data directory, and open V4L2/network devices -
-# nothing else on the system.
+# read/write its own data directory, open V4L2/network devices, and make
+# outbound/inbound TCP+UDP connections (HTTP, RTSP, WebRTC/ICE) - nothing
+# else on the system. Deliberately does NOT set `PrivateDevices=true`:
+# that would block access to /dev/videoN along with everything else
+# under /dev, breaking USB camera capture entirely - the option some
+# hardening guides suggest by default isn't safe to apply blindly here.
+# Verify with `systemd-analyze security omnimonitor` after installing -
+# these flags weren't exercised against a real systemd instance while
+# writing this unit, only reasoned about from what the service actually
+# needs to do.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/omnimonitor
 PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

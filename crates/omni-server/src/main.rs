@@ -14,7 +14,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
-use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
@@ -94,11 +93,16 @@ async fn main() -> anyhow::Result<()> {
     let static_service =
         ServeDir::new(&frontend_dist).not_found_service(ServeFile::new(index_html));
 
+    // No CORS layer: the frontend is always served by this same process
+    // (or, in dev, proxied to it by Vite - see frontend/vite.config.ts),
+    // so every legitimate request is same-origin already. `CorsLayer::
+    // permissive()` used to sit here doing nothing useful for that case
+    // while needlessly telling *other* origins' browsers it's fine to
+    // read responses from this cookie-authenticated API.
     let app = Router::new()
         .merge(routes::api_routes(Arc::clone(&state)))
         .fallback_service(static_service)
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.http_port));

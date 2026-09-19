@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::{ConnectInfo, Path, Request, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -80,7 +80,7 @@ async fn auth_login(
     let Some((username, hash)) = state.db.admin_user().await.map_err(internal_error)? else {
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "no admin account configured".to_string()));
     };
-    if req.username != username || !auth::verify_password(&req.password, &hash) {
+    if req.username != username || !auth::verify_password_async(req.password.clone(), hash).await {
         state.login_rate_limiter.record_failure(ip);
         return Err((StatusCode::UNAUTHORIZED, "invalid username or password".to_string()));
     }
@@ -136,6 +136,7 @@ struct ChangePasswordRequest {
 
 async fn auth_change_password(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, ApiError> {
     validate::validate_password(&req.new_password).map_err(bad_request)?;
@@ -145,14 +146,27 @@ async fn auth_change_password(
         .await
         .map_err(internal_error)?
         .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no admin account configured".to_string()))?;
-    if !auth::verify_password(&req.current_password, &hash) {
+    if !auth::verify_password_async(req.current_password.clone(), hash).await {
         return Err((StatusCode::UNAUTHORIZED, "current password is incorrect".to_string()));
     }
+    let new_hash = auth::hash_password_async(req.new_password.clone()).await;
     state
         .db
-        .set_admin_user(&username, &auth::hash_password(&req.new_password))
+        .set_admin_user(&username, &new_hash)
         .await
         .map_err(internal_error)?;
+
+    // A password change is usually prompted by "this password might be
+    // compromised" - leaving every other already-issued session (good
+    // for 30 days) valid afterwards would defeat the point. Keep only
+    // the session making this request, so the user isn't logged out by
+    // their own change.
+    if let Some(current_token) = auth::session_token_from_headers(&headers) {
+        if let Err(err) = state.db.delete_sessions_except(&current_token).await {
+            tracing::warn!(%err, "failed to revoke other sessions after password change");
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -515,6 +529,16 @@ fn bad_request<E: std::fmt::Display>(err: E) -> ApiError {
     (StatusCode::BAD_REQUEST, err.to_string())
 }
 
+/// Unlike `bad_request` (whose messages are `ValidationError`s meant to
+/// be shown to the user), this wraps failures that are never the
+/// client's fault - DB errors, IO errors - which can carry internal
+/// detail (file paths, driver-specific error text) that has no business
+/// being sent back over the API. Logs the real error server-side and
+/// returns a generic message instead.
 fn internal_error<E: std::fmt::Display>(err: E) -> ApiError {
-    (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+    tracing::error!(%err, "internal error handling API request");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal server error".to_string(),
+    )
 }

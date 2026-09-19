@@ -172,6 +172,65 @@ order the project intends to tackle things.
       restarts an already-running service into the new build instead of
       just enabling the unit again.
 
+## v0.8.1 - security review fixes - done
+
+An external code review of the v0.8 tree (reading the source only, not
+running it) found several real issues - see "Security review fixes
+(v0.8.1)" in `docs/ARCHITECTURE.md` for the full writeup of each. In
+order of what the review rated most severe:
+
+- [x] GStreamer pipeline injection via RTSP camera URL - fixed by
+      setting `location` as a typed property after parsing instead of
+      interpolating the URL into the launch string. Verified against a
+      real RTSP server: normal URLs still work, an injection attempt no
+      longer has any effect.
+- [x] SSRF via the motion webhook - mitigated by rejecting loopback/
+      link-local/unspecified resolved addresses and disabling redirect-
+      following at send time (LAN addresses deliberately still allowed -
+      notifying local home-automation is the point of the feature).
+- [x] Cross-site WebSocket hijacking on `/api/stream/:camera_id` -
+      mitigated with an `Origin`-vs-`Host` check on the upgrade request.
+      Verified live: mismatched origin gets `403`, matching origin still
+      completes the `101` upgrade.
+- [x] Removed the unused, needlessly permissive `CorsLayer::permissive()`
+      - the frontend is always same-origin, nothing needed it.
+- [x] Session tokens now stored hashed (SHA-256) rather than in
+      plaintext, so a leaked DB file doesn't hand out ready-to-use
+      sessions.
+- [x] Changing the admin password now revokes every other session
+      immediately (kept only the one making the change) - previously a
+      leaked-but-not-yet-noticed session survived a password change for
+      its full 30-day life.
+- [x] Argon2 hashing/verification moved off the async runtime via
+      `spawn_blocking`, so a burst of login attempts can't tie up a
+      tokio worker thread.
+- [x] `internal_error` no longer echoes DB/IO error text (paths, driver
+      detail) to the client - logs it server-side, returns a generic
+      message instead.
+- [x] Optional `Secure` cookie flag (`OMNI_COOKIE_SECURE=1`) for anyone
+      running behind the documented TLS reverse proxy.
+- [x] Resolution validation upper bound (8K) - previously only rejected
+      zero.
+- [x] `cargo audit` in CI, which caught two real things while being set
+      up: `sqlx` was pulling in its unused MySQL/Postgres drivers via
+      default features (now `default-features = false`), and `sqlx`
+      0.7.4 had a real fixed advisory unrelated to SQLite usage (bumped
+      to 0.8, re-verified full camera CRUD + login against the existing
+      database afterward). One advisory with no available fix (`rsa`,
+      reachable only via an optional driver this project never compiles)
+      is explicitly `ignore`d in CI with the reasoning inline.
+- [x] Extra systemd sandboxing flags in `packaging/omnimonitor.service`
+      (not verified against a live systemd instance - see
+      `docs/ARCHITECTURE.md`).
+
+Reviewed and deliberately left as-is (reasoning in `docs/ARCHITECTURE.md`):
+login rate limiting being keyed by TCP peer address (already a documented
+tradeoff of running behind a reverse proxy), RTSP camera URLs/credentials
+being visible via `GET /api/cameras` to an already-authenticated admin
+(same trust boundary as other credential-revealing endpoints), and
+`curl | sh` in `scripts/bootstrap.sh` (each tool's own official install
+method).
+
 ## Later / unscheduled
 
 - [ ] Apply camera settings changes (recording toggle, resolution, motion

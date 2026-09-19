@@ -524,7 +524,167 @@ being true. Only the HTTP API/UI can go through an HTTP(S) reverse proxy
 this way - the RTSP server (5544, see above) isn't HTTP, so exposing it
 past a LAN needs a TLS-capable TCP proxy (`stunnel`) or a VPN instead.
 
-## Known limitations / honest gaps in v0.8
+## Security review fixes (v0.8.1)
+
+An external code review of the v0.8 tree (reading the source, not
+running it) surfaced several real issues, addressed here in order of
+what it rated most severe:
+
+- **GStreamer pipeline injection via RTSP URL, fixed.** The RTSP
+  camera's URL used to be formatted directly into the `gst::parse::
+  launch` description string (`rtspsrc location="{url}" ...`) -
+  `validate_rtsp_url` only checked for an `rtsp://` prefix, not the
+  absence of a `"`, so a URL containing one could break out of the
+  quoted property and append arbitrary pipeline elements (e.g. a
+  `filesink` writing files as the service user). Only an authenticated
+  admin could reach this (camera URLs are only ever set via the
+  session-gated `POST /api/cameras`), so it was a privilege-widening
+  bug, not an anonymous remote one - but still the most serious finding.
+  Fixed in `omni-capture::pipeline` by never interpolating the URL into
+  the launch string at all: `CaptureSource::Rtsp` gets a named,
+  property-less `rtspsrc` in the description, and `CaptureSession::start`
+  sets `location` on it afterward via `Element::set_property` - a typed
+  GObject property setter, not a string that gets parsed as gst-launch
+  syntax. Verified against a real RTSP test server both that normal
+  URLs still capture frames and that a URL crafted to break out
+  (containing `" ! filesink location=...`) no longer creates the target
+  file - `rtspsrc` just fails to connect to the literal (now-harmless)
+  string instead.
+- **SSRF via the motion webhook, mitigated.** `validate_webhook_url`
+  (shared with the browser via `omni-wasm`, so it can only ever check
+  the URL's *shape*, not resolve it) only checked for an `http(s)://`
+  prefix, so a webhook could be pointed at `127.0.0.1`, a cloud
+  metadata endpoint, or anywhere else the server can reach. Since this
+  requires an authenticated admin to configure, and the actual point of
+  the feature is notifying a home-automation box that's typically *on
+  the same LAN* as the cameras, a blanket "no private IPs" rule would
+  break the intended use case. `omni-server::motion::send_webhook`
+  instead resolves the URL's host right before sending and rejects
+  loopback/link-local/unspecified destinations specifically (which
+  covers the cloud-metadata and "reach the server itself" cases) while
+  still allowing ordinary RFC1918 LAN addresses through, and disables
+  HTTP redirect-following so a webhook that starts out pointing
+  somewhere allowed can't 302 the request elsewhere. Not airtight
+  against DNS rebinding between the resolve-time check and the actual
+  connect (that would need a custom `reqwest` resolver/connector
+  hooking the TCP connect itself), but closes the straightforward case.
+- **No CORS layer.** `CorsLayer::permissive()` was applied globally but
+  did nothing useful: the frontend is always served by this same
+  process (or proxied to it by Vite in dev - see
+  `frontend/vite.config.ts`), so every legitimate request is
+  same-origin already. Removed entirely rather than tuned, since
+  nothing needs it.
+- **Cross-site WebSocket hijacking, mitigated.** The session-cookie
+  check (`require_auth`) wrapping `/api/stream/:camera_id` isn't enough
+  on its own: unlike a `fetch()`, a browser's WebSocket handshake
+  attaches cookies regardless of which site's JavaScript opened it, so
+  a malicious page could open a WS connection here and ride the
+  victim's session. `omni-server::ws::stream_ws_handler` now checks the
+  handshake's `Origin` header against its own `Host` and rejects the
+  upgrade with `403` on a mismatch (no `Origin` header at all - not
+  possible for a real cross-site browser request - is let through, same
+  as a same-origin request). Verified live: a mismatched-`Origin`
+  handshake gets `403`, a matching one still completes the normal `101
+  Switching Protocols` upgrade.
+- **Session tokens hashed at rest.** `sessions.token` used to store the
+  bearer token verbatim; a leaked DB file (backup, misconfigured
+  permissions) would hand out immediately-usable 30-day sessions.
+  `omni-db` now stores/looks up `SHA-256(token)` instead - fine here
+  even unsalted, since the input is already a 48-character
+  cryptographically random token (`auth::generate_token`), not a
+  human-chosen secret, so there's no dictionary attack to defend
+  against; this only closes the "bulk DB leak yields live sessions"
+  case. One consequence: upgrading past this version invalidates every
+  session that existed before it (old plaintext rows can't match a
+  hash lookup) - a one-time forced re-login, not a bug.
+- **Password change now revokes other sessions.** Previously, changing
+  the admin password (the standard response to "this password might be
+  compromised") left every other already-issued session valid for the
+  rest of its normal 30-day life. `auth_change_password` now calls
+  `Db::delete_sessions_except` with the session making the request, so
+  every *other* session is invalidated immediately while the user isn't
+  logged out by their own change. Verified live with two concurrent
+  sessions: changing the password via one leaves it valid and gets the
+  other a `401` on its next request.
+- **Argon2 moved off the async runtime.** `verify_password`/
+  `hash_password` are deliberately slow (that's the point of a password
+  hash) and were being called inline inside `auth_login`/
+  `auth_change_password`'s async handlers, tying up a tokio worker
+  thread for the duration. `auth::verify_password_async`/
+  `hash_password_async` now run them via `tokio::task::spawn_blocking`
+  instead, so a burst of login attempts can't starve unrelated requests
+  on a small worker pool.
+- **`internal_error` no longer echoes internal detail to the client.**
+  It used to return `err.to_string()` (DB error text, file paths, ...)
+  as the response body for any unexpected server-side failure -
+  `bad_request` (used for `ValidationError`s meant to be shown to the
+  user) is unaffected. `internal_error` now logs the real error via
+  `tracing::error!` and returns a fixed "internal server error" message.
+- **`Secure` cookie support**, opt-in via `OMNI_COOKIE_SECURE=1` for
+  anyone running behind a TLS-terminating reverse proxy (see "HTTPS"
+  below) - left off by default since the server itself still only ever
+  speaks plain HTTP, and `Secure` would make the browser silently stop
+  sending the cookie at all in that default setup.
+- **Resolution upper bound.** `validate_resolution` only rejected zero
+  in either dimension; a malformed or malicious `PATCH /api/cameras/:id`
+  could request an arbitrarily large resolution and have the pipeline
+  try to allocate buffers for it. Capped at 7680x4320 (8K) - no real
+  camera exceeds this.
+- **`cargo audit` added to CI** (`.github/workflows/ci.yml`), checking
+  `Cargo.lock` against the RustSec advisory database on every push/PR.
+  Running it locally for the first time surfaced two real things to
+  fix: `sqlx` was declared with its *default* features on top of the
+  explicit `sqlite` one, silently pulling in the unused MySQL and
+  Postgres drivers (and, via MySQL's auth plugin, the `rsa` crate) into
+  the dependency graph and, for MySQL/Postgres, the actual compiled
+  binary too, confirmed by checking `target/debug/deps` before and after
+  - now `default-features = false` with only `sqlite`/`macros`/etc.
+  explicitly listed. Separately, `sqlx` 0.7.4 has a real fixed advisory
+  (RUSTSEC-2024-0363, a wire-protocol decoding bug in the MySQL/Postgres
+  decoders this project doesn't even compile) - bumped to `0.8` anyway
+  since a version with a real fix is simpler and more honest than
+  arguing the unreachable code doesn't matter; verified compiling
+  cleanly and re-tested the full camera CRUD path (create/list/update/
+  delete) plus login/sessions against the existing SQLite database
+  afterward. What's left, `RUSTSEC-2023-0071` (`rsa`, no fix available
+  upstream, reachable only via the still-`Cargo.lock`-listed-but-never-
+  compiled `sqlx-mysql`), is explicitly `ignore`d in the CI step with
+  the reasoning inline - `cargo audit` scans Cargo.lock's full dependency
+  graph, not per-feature reachability, so an unactivated optional
+  dependency can still show up there with no way to make it disappear
+  short of dropping `sqlx` entirely.
+- **Extra systemd sandboxing** (`packaging/omnimonitor.service`):
+  `RestrictAddressFamilies`, `RestrictNamespaces`, `LockPersonality`,
+  `MemoryDenyWriteExecute`, `ProtectKernelTunables`/`Modules`/`Logs`,
+  `ProtectControlGroups`, `ProtectClock`, and `SystemCallFilter=
+  @system-service`. Deliberately does **not** add `PrivateDevices=true`
+  (a common hardening suggestion) - that blocks all of `/dev`, including
+  the `/dev/videoN` nodes USB capture depends on, which would silently
+  break the core feature. These flags were reasoned about from what the
+  service actually needs, not verified against a live systemd instance
+  in this session - run `systemd-analyze security omnimonitor` after
+  installing to check.
+
+Reviewed and deliberately left as-is, with reasoning:
+
+- **Login rate limiting is keyed by TCP peer address**, which is the
+  reverse proxy's address for anyone following the "HTTPS" setup below -
+  already documented in "Login rate limiting" above; there's no fix
+  that doesn't either trust a spoofable `X-Forwarded-For` header or
+  require configuring which proxy to trust, which is a bigger feature
+  than this pass was scoped for.
+- **RTSP camera URLs (which may embed credentials) are stored and
+  returned as-is by `GET /api/cameras`.** Same trust boundary as the
+  RTSP/admin credentials already exposed by other session-gated
+  endpoints (`GET /api/rtsp-credentials`) - not a new exposure, just
+  worth naming. Redacting it while still allowing the settings form to
+  edit other fields without re-entering the URL is a real feature, not
+  a one-line fix; left for later.
+- **`curl | sh` in `scripts/bootstrap.sh`** for rustup/wasm-pack is each
+  tool's own officially documented install method, not a shortcut this
+  project invented.
+
+## Known limitations / honest gaps in v0.8.1
 
 - **Single admin account and single RTSP credential, not
   per-camera or per-user permissions** - every camera's RTSP mount point

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -45,8 +46,43 @@ pub async fn stream_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
     Path(camera_id): Path<Uuid>,
-) -> impl IntoResponse {
+    headers: HeaderMap,
+) -> axum::response::Response {
+    // `require_auth` (the session-cookie check wrapping this route)
+    // isn't enough on its own here: a cross-site page can open a
+    // WebSocket to this endpoint from JavaScript and the browser attaches
+    // the session cookie automatically regardless of which site asked for
+    // it (that's the whole mechanism a cross-site WebSocket hijacking
+    // attack relies on - unlike a fetch(), the browser doesn't apply
+    // SameSite/CORS the same way to the WS handshake). Reject the upgrade
+    // if the browser-supplied `Origin` doesn't match this server's own
+    // `Host`, same defense a plain cookie-authenticated REST endpoint
+    // gets for free from SameSite=Lax on non-GET requests.
+    if !origin_matches_host(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            "cross-origin WebSocket connections are not allowed",
+        )
+            .into_response();
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, state, camera_id))
+        .into_response()
+}
+
+fn origin_matches_host(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
+        // No Origin header at all isn't a browser cross-site request (browsers
+        // always send it for a cross-origin WS handshake) - let it through
+        // and rely on the session cookie check as usual.
+        return true;
+    };
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let origin_host = origin
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    origin_host == host
 }
 
 async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, camera_id: Uuid) {

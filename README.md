@@ -7,7 +7,7 @@ for a Ubiquiti-Protect-style dashboard UI/UX with **USB webcams treated as
 first-class cameras** - plug in a UVC camera over USB and it gets the same
 live-preview and recording pipeline a network/RTSP camera would.
 
-Status: **Alpha (v0.8)**. Live preview over WebRTC (trickle ICE),
+Status: **Alpha (v0.8.1)**. Live preview over WebRTC (trickle ICE),
 continuous or motion-triggered segmented recording with retention,
 motion detection with webhook alerts, single-account login with
 brute-force lockout, an authenticated RTSP server that re-serves every
@@ -207,6 +207,21 @@ Only the web UI (port 8090) can go through an HTTP(S) reverse proxy this
 way - the RTSP server (port 5544) isn't HTTP, so it needs a TLS-capable
 TCP proxy (e.g. `stunnel`) or a VPN if you need it reachable outside your
 LAN at all.
+
+If you do put a reverse proxy in front, set `OMNI_COOKIE_SECURE=1` (see
+`packaging/omnimonitor.service`) so the session cookie is only ever sent
+over the proxy's encrypted hop.
+
+## Security
+
+v0.8.1 addressed a round of real findings from an external code review -
+see "Security review fixes (v0.8.1)" in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full list and
+reasoning (a GStreamer pipeline injection via RTSP camera URLs, SSRF
+mitigation on the motion webhook, cross-site WebSocket hijacking
+protection, hashed session tokens, and more). This is still an early
+Alpha with a single admin account and no independent security audit -
+treat it accordingly, especially before exposing it past a trusted LAN.
 
 ## License
 

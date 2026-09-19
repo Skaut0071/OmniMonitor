@@ -74,3 +74,27 @@ jobs:
       - name: npm run build
         working-directory: frontend
         run: npm run build
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Checks Cargo.lock against the RustSec advisory database for
+      # known-vulnerable dependency versions - doesn't need the project
+      # itself to build (it only reads Cargo.lock), so it's a separate,
+      # fast job rather than a step tacked onto `backend`.
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # RUSTSEC-2023-0071 (rsa crate, timing sidechannel, no fixed
+          # version exists upstream) only reaches this project via
+          # sqlx-mysql - an optional sqlx driver this project never
+          # activates (sqlx is configured with default-features = false
+          # and only the "sqlite" driver enabled, see Cargo.toml) and
+          # confirmed not present in any built binary. It's still listed
+          # in Cargo.lock because Cargo.lock records the whole possible
+          # dependency graph, not just what's feature-activated for this
+          # build - a known limitation of lockfile-based scanning, not a
+          # real exposure here. Ignored explicitly rather than left to
+          # perpetually fail CI on an advisory with no available fix.
+          ignore: RUSTSEC-2023-0071

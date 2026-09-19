@@ -10,7 +10,7 @@ pub enum ValidationError {
     EmptyName,
     #[error("camera name must be 64 characters or fewer")]
     NameTooLong,
-    #[error("resolution must be non-zero in both dimensions")]
+    #[error("resolution must be non-zero and at most 7680x4320 (8K) in both dimensions")]
     InvalidResolution,
     #[error("framerate must be between 1 and 120")]
     InvalidFramerate,
@@ -39,8 +39,13 @@ pub fn validate_camera_name(name: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// Upper bound (8K in each dimension) exists so a malformed or malicious
+/// `PATCH /api/cameras/:id` can't request an absurd resolution (e.g.
+/// billions of pixels) and have the GStreamer pipeline try to allocate
+/// buffers for it - cheap to check, and no real camera exceeds this.
 pub fn validate_resolution(width: u32, height: u32) -> Result<(), ValidationError> {
-    if width == 0 || height == 0 {
+    const MAX_DIMENSION: u32 = 7680;
+    if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
         return Err(ValidationError::InvalidResolution);
     }
     Ok(())
@@ -123,6 +128,19 @@ mod tests {
             validate_resolution(0, 720),
             Err(ValidationError::InvalidResolution)
         );
+    }
+
+    #[test]
+    fn rejects_absurd_resolution() {
+        assert_eq!(
+            validate_resolution(1_000_000, 720),
+            Err(ValidationError::InvalidResolution)
+        );
+    }
+
+    #[test]
+    fn accepts_8k_resolution() {
+        assert_eq!(validate_resolution(7680, 4320), Ok(()));
     }
 
     #[test]

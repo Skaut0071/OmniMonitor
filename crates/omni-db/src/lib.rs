@@ -10,9 +10,26 @@ use omni_core::{
     Camera, CameraKind, MotionEvent, MotionSettings, RecordingSettings, RecordingTrigger,
     StreamCodec,
 };
+use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::{FromRow, Row};
 use uuid::Uuid;
+
+/// Session tokens are stored hashed (SHA-256, hex), never in plaintext -
+/// they're bearer credentials good for 30 days (`SESSION_LIFETIME` in
+/// `omni-server::auth`), so a leaked DB file (backup, misconfigured
+/// permissions, ...) shouldn't hand out ready-to-use sessions the way a
+/// plaintext copy would. A fast, unsalted hash is fine here (unlike a
+/// password): the input is already a 48-character cryptographically
+/// random token (`auth::generate_token`), not a human-memorable secret,
+/// so there's no offline dictionary/rainbow-table attack to defend
+/// against - the only thing this protects against is a bulk DB leak
+/// directly yielding usable session cookies.
+fn hash_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
 
 #[derive(Clone)]
 pub struct Db {
@@ -440,7 +457,7 @@ impl Db {
 
     pub async fn create_session(&self, token: &str, expires_at: chrono::DateTime<chrono::Utc>) -> Result<()> {
         sqlx::query("INSERT INTO sessions (token, expires_at) VALUES (?, ?)")
-            .bind(token)
+            .bind(hash_token(token))
             .bind(expires_at)
             .execute(&self.pool)
             .await?;
@@ -450,7 +467,7 @@ impl Db {
     /// True if `token` names a session that hasn't expired.
     pub async fn session_valid(&self, token: &str) -> Result<bool> {
         let row = sqlx::query("SELECT expires_at FROM sessions WHERE token = ?")
-            .bind(token)
+            .bind(hash_token(token))
             .fetch_optional(&self.pool)
             .await?;
         let Some(row) = row else { return Ok(false) };
@@ -460,7 +477,20 @@ impl Db {
 
     pub async fn delete_session(&self, token: &str) -> Result<()> {
         sqlx::query("DELETE FROM sessions WHERE token = ?")
-            .bind(token)
+            .bind(hash_token(token))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Deletes every session except `keep_token` - used when the admin
+    /// password changes, so a session token that leaked before the
+    /// change (the whole reason to change it) doesn't just keep working
+    /// afterwards. The session making the change request itself is kept
+    /// so the user isn't logged out by their own password change.
+    pub async fn delete_sessions_except(&self, keep_token: &str) -> Result<()> {
+        sqlx::query("DELETE FROM sessions WHERE token != ?")
+            .bind(hash_token(keep_token))
             .execute(&self.pool)
             .await?;
         Ok(())

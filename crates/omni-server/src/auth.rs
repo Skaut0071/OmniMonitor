@@ -47,6 +47,26 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
         .is_ok()
 }
 
+/// Argon2 is deliberately slow (that's the point of a password hash),
+/// which means running it inline on an async handler ties up that
+/// tokio worker thread for the whole hash/verify - fine at low request
+/// volume, but a burst of login attempts (including the rate limiter's
+/// own free failures, or a small distributed brute-force it can't stop
+/// on its own - see `LoginRateLimiter`'s docs) could starve other
+/// requests on a small worker pool. `spawn_blocking` moves the actual
+/// computation onto tokio's blocking thread pool instead.
+pub async fn verify_password_async(password: String, hash: String) -> bool {
+    tokio::task::spawn_blocking(move || verify_password(&password, &hash))
+        .await
+        .unwrap_or(false)
+}
+
+pub async fn hash_password_async(password: String) -> String {
+    tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .expect("password-hashing task panicked")
+}
+
 pub fn generate_token() -> String {
     rand::thread_rng()
         .sample_iter(&Alphanumeric)
@@ -200,25 +220,42 @@ pub fn session_expiry() -> chrono::DateTime<chrono::Utc> {
     chrono::Utc::now() + SESSION_LIFETIME
 }
 
+/// Whether to set `Secure` on the session cookie - off by default (the
+/// server itself still only ever speaks plain HTTP, see docs/
+/// ARCHITECTURE.md's "HTTPS" section, and `Secure` would make the
+/// browser silently stop sending the cookie at all in that default
+/// setup). Set `OMNI_COOKIE_SECURE=1` when running behind a TLS-
+/// terminating reverse proxy (packaging/Caddyfile.example,
+/// packaging/nginx.conf.example) so the browser only ever sends the
+/// session cookie over the encrypted hop, not the plain-HTTP one some
+/// proxy misconfigurations could otherwise still expose it to.
+fn cookie_is_secure() -> bool {
+    std::env::var("OMNI_COOKIE_SECURE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 pub fn set_cookie_header(token: &str) -> (header::HeaderName, String) {
+    let secure = if cookie_is_secure() { "; Secure" } else { "" };
     (
         header::SET_COOKIE,
         format!(
-            "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+            "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}",
             SESSION_LIFETIME.num_seconds()
         ),
     )
 }
 
 pub fn clear_cookie_header() -> (header::HeaderName, String) {
+    let secure = if cookie_is_secure() { "; Secure" } else { "" };
     (
         header::SET_COOKIE,
-        format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
+        format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}"),
     )
 }
 
-fn session_token_from_request(req: &Request) -> Option<String> {
-    let cookie_header = req.headers().get(header::COOKIE)?.to_str().ok()?;
+pub fn session_token_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
     cookie_header.split(';').find_map(|part| {
         let part = part.trim();
         part.strip_prefix(&format!("{SESSION_COOKIE}="))
@@ -246,7 +283,7 @@ pub async fn require_auth(
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let token = session_token_from_request(&req).ok_or(StatusCode::UNAUTHORIZED)?;
+    let token = session_token_from_headers(req.headers()).ok_or(StatusCode::UNAUTHORIZED)?;
     let valid = state
         .db
         .session_valid(&token)
