@@ -19,6 +19,7 @@ use omni_core::{
 use crate::auth;
 use crate::discovery::auto_discover_usb_cameras;
 use crate::onvif_discovery::{self, DiscoveredDevice};
+use crate::reachability;
 use crate::state::AppState;
 use crate::ws::stream_ws_handler;
 
@@ -30,8 +31,13 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let protected = Router::new()
         .route("/api/config", get(get_config))
         .route("/api/cameras", get(list_cameras).post(create_camera))
+        .route("/api/cameras/status", get(cameras_status))
         .route("/api/cameras/discover", post(discover_cameras))
         .route("/api/cameras/reorder", axum::routing::put(reorder_cameras))
+        .route(
+            "/api/camera-groups/rename",
+            post(rename_camera_group),
+        )
         .route("/api/onvif/discover", post(discover_onvif))
         .route("/api/ignored-usb-devices", get(list_ignored_usb_devices))
         .route(
@@ -213,6 +219,67 @@ async fn list_cameras(State(state): State<Arc<AppState>>) -> Json<Vec<Camera>> {
     Json(state.db.list_cameras().await.unwrap_or_default())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StatusOverview {
+    /// A pipeline is running for this camera and producing frames.
+    Streaming,
+    /// A pipeline is running but hit an error.
+    Error,
+    /// No pipeline running, but the device/host answered a cheap
+    /// presence check - see `reachability::probe_reachable`.
+    Online,
+    /// No pipeline running and the presence check failed (USB unplugged,
+    /// RTSP host unreachable).
+    Offline,
+}
+
+#[derive(Serialize)]
+struct CameraStatusInfo {
+    id: Uuid,
+    name: String,
+    kind: &'static str,
+    status: StatusOverview,
+}
+
+/// A no-video overview of every camera's reachability - USB vs network
+/// (`kind`) and online/offline/streaming/error (`status`) - without
+/// opening a live view for each one. For a camera with an active
+/// pipeline this is exact (`Supervisor::pipeline_status`); for an idle
+/// one it's a best-effort presence check (`reachability::probe_reachable`)
+/// run fresh on every call, so this endpoint is a little slower than a
+/// plain camera list (a couple of seconds if several RTSP cameras are
+/// unreachable and each has to time out) - acceptable for a status page
+/// that's opened occasionally, not polled tightly.
+async fn cameras_status(State(state): State<Arc<AppState>>) -> Json<Vec<CameraStatusInfo>> {
+    let cameras = state.db.list_cameras().await.unwrap_or_default();
+    let mut out = Vec::with_capacity(cameras.len());
+    for camera in cameras {
+        let kind = match camera.kind {
+            CameraKind::Usb { .. } => "usb",
+            CameraKind::Rtsp { .. } => "rtsp",
+        };
+        let status = match state.supervisor.pipeline_status(camera.id).await {
+            Some(omni_core::CameraStatus::Error) => StatusOverview::Error,
+            Some(_) => StatusOverview::Streaming,
+            None => {
+                if reachability::probe_reachable(&camera).await {
+                    StatusOverview::Online
+                } else {
+                    StatusOverview::Offline
+                }
+            }
+        };
+        out.push(CameraStatusInfo {
+            id: camera.id,
+            name: camera.name,
+            kind,
+            status,
+        });
+    }
+    Json(out)
+}
+
 async fn discover_cameras(State(state): State<Arc<AppState>>) -> Json<Vec<Camera>> {
     auto_discover_usb_cameras(&state.db).await;
     let cameras = state.db.list_cameras().await.unwrap_or_default();
@@ -262,6 +329,36 @@ async fn reorder_cameras(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+struct RenameCameraGroupRequest {
+    old_name: String,
+    new_name: String,
+}
+
+/// Renames a group tab across every camera that has it - there's no
+/// separate `groups` table with its own id/row to rename instead (see
+/// `omni_core::Camera::group`'s docs), so this is a bulk find-and-replace.
+async fn rename_camera_group(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RenameCameraGroupRequest>,
+) -> Result<StatusCode, ApiError> {
+    let new_name = req.new_name.trim();
+    validate::validate_group_name(new_name).map_err(bad_request)?;
+    if new_name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "new group name must not be empty - clear a camera's group individually instead"
+                .to_string(),
+        ));
+    }
+    state
+        .db
+        .rename_camera_group(req.old_name.trim(), new_name)
+        .await
+        .map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Probes the LAN for ONVIF network cameras (WS-Discovery multicast) and
 /// returns whatever answers within a few seconds - see
 /// `onvif_discovery` for why this stops at "here's an IP and device
@@ -305,6 +402,7 @@ async fn create_camera(
         motion: MotionSettings::default(),
         rotation: Rotation::default(),
         sort_order,
+        group: None,
         status: None,
     };
 
@@ -353,6 +451,9 @@ struct UpdateCameraRequest {
     recording: Option<UpdateRecordingRequest>,
     motion: Option<UpdateMotionRequest>,
     rotation: Option<Rotation>,
+    /// `Some("")` (or whitespace-only) clears the group; `None` leaves it
+    /// unchanged - same convention as `motion.webhook_url`.
+    group: Option<String>,
 }
 
 async fn update_camera(
@@ -434,6 +535,12 @@ async fn update_camera(
 
     if let Some(rotation) = req.rotation {
         camera.rotation = rotation;
+    }
+
+    if let Some(group) = req.group {
+        let trimmed = group.trim();
+        validate::validate_group_name(trimmed).map_err(bad_request)?;
+        camera.group = (!trimmed.is_empty()).then(|| trimmed.to_string());
     }
 
     state
@@ -568,12 +675,30 @@ struct RecordingInfo {
     filename: String,
     size_bytes: u64,
     modified: String,
+    /// Approximate - `splitmuxsink` doesn't record each segment's exact
+    /// start time anywhere, only the file's own mtime (~when it finished
+    /// being written, i.e. roughly `modified`). Computed as
+    /// `modified - segment_seconds`, which is exactly right for a
+    /// full-length segment and off by however much the *current*
+    /// in-progress segment or a just-restarted pipeline's first segment
+    /// falls short of the configured length. Good enough for placing
+    /// segments on a timeline; see `docs/ARCHITECTURE.md` for why exact
+    /// per-segment timestamps would need real pipeline instrumentation.
+    started_at: String,
 }
 
 async fn list_recordings(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<RecordingInfo>>, ApiError> {
+    let segment_seconds = state
+        .db
+        .get_camera(id)
+        .await
+        .map_err(internal_error)?
+        .map(|c| c.recording.segment_seconds)
+        .unwrap_or(300);
+
     let dir = state.supervisor.recordings_dir(id);
     let mut entries = match tokio::fs::read_dir(&dir).await {
         Ok(e) => e,
@@ -590,6 +715,7 @@ async fn list_recordings(
         let meta = entry.metadata().await.map_err(internal_error)?;
         let modified: chrono::DateTime<chrono::Utc> =
             meta.modified().map_err(internal_error)?.into();
+        let started_at = modified - chrono::Duration::seconds(segment_seconds as i64);
         out.push(RecordingInfo {
             filename: path
                 .file_name()
@@ -597,6 +723,7 @@ async fn list_recordings(
                 .unwrap_or_default(),
             size_bytes: meta.len(),
             modified: modified.to_rfc3339(),
+            started_at: started_at.to_rfc3339(),
         });
     }
     out.sort_by(|a, b| a.filename.cmp(&b.filename));

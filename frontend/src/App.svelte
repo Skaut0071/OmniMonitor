@@ -9,15 +9,20 @@
   import RtspCredentialsModal from "./lib/RtspCredentialsModal.svelte";
   import ExpandedCameraModal from "./lib/ExpandedCameraModal.svelte";
   import IgnoredUsbDevicesModal from "./lib/IgnoredUsbDevicesModal.svelte";
+  import StatusOverview from "./lib/StatusOverview.svelte";
   import {
     listCameras,
     discoverCameras,
     deleteCamera,
     reorderCameras,
+    renameCameraGroup,
     me,
     logout,
     type Camera,
   } from "./lib/api";
+
+  let view: "dashboard" | "status" = "dashboard";
+  let selectedGroup: string | null = null; // null = "All"
 
   let authChecked = false;
   let username: string | null = null;
@@ -55,6 +60,36 @@
   async function remove(id: string) {
     await deleteCamera(id);
     await refresh();
+  }
+
+  // Distinct group names present across all cameras, in first-seen order
+  // - the tab list is derived from the data, there's no separate "create
+  // a group" step (see Camera.group's docs: a group only exists in the
+  // sense that some camera currently has that string set).
+  $: groups = [...new Set(cameras.map((c) => c.group).filter((g): g is string => !!g))];
+  $: visibleCameras =
+    selectedGroup === null ? cameras : cameras.filter((c) => c.group === selectedGroup);
+
+  let renamingGroup: string | null = null;
+  let renameValue = "";
+
+  function startRename(name: string) {
+    renamingGroup = name;
+    renameValue = name;
+  }
+
+  async function commitRename() {
+    const oldName = renamingGroup;
+    renamingGroup = null;
+    const newName = renameValue.trim();
+    if (!oldName || !newName || newName === oldName) return;
+    try {
+      await renameCameraGroup(oldName, newName);
+      if (selectedGroup === oldName) selectedGroup = newName;
+      await refresh();
+    } catch (e) {
+      loadError = (e as Error).message;
+    }
   }
 
   let draggedId: string | null = null;
@@ -125,7 +160,14 @@
         <span class="brand-name">OmniMonitor</span>
       </div>
       <nav>
-        <a class="active" href="#/">Dashboard</a>
+        <!-- svelte-ignore a11y-invalid-attribute -->
+        <a class:active={view === "dashboard"} href="#/" on:click|preventDefault={() => (view = "dashboard")}
+          >Dashboard</a
+        >
+        <!-- svelte-ignore a11y-invalid-attribute -->
+        <a class:active={view === "status"} href="#/" on:click|preventDefault={() => (view = "status")}
+          >Status</a
+        >
       </nav>
       <div class="sidebar-footer">
         <button class="ghost" on:click={runDiscover}>Rescan USB cameras</button>
@@ -144,11 +186,15 @@
 
     <main>
       <header>
-        <h1>Cameras</h1>
-        <span class="count">{cameras.length} camera{cameras.length === 1 ? "" : "s"}</span>
+        <h1>{view === "status" ? "Camera status" : "Cameras"}</h1>
+        <span class="count"
+          >{visibleCameras.length} camera{visibleCameras.length === 1 ? "" : "s"}</span
+        >
       </header>
 
-      {#if loading}
+      {#if view === "status"}
+        <StatusOverview />
+      {:else if loading}
         <p class="hint">Loading…</p>
       {:else if loadError}
         <p class="error">{loadError}</p>
@@ -160,8 +206,42 @@
           </p>
         </div>
       {:else}
+        {#if groups.length > 0}
+          <div class="group-tabs">
+            <button class:active={selectedGroup === null} on:click={() => (selectedGroup = null)}
+              >All</button
+            >
+            {#each groups as g (g)}
+              {#if renamingGroup === g}
+                <!-- svelte-ignore a11y-autofocus -->
+                <input
+                  class="group-rename"
+                  autofocus
+                  bind:value={renameValue}
+                  on:blur={commitRename}
+                  on:keydown={(e) => {
+                    if (e.key === "Enter") commitRename();
+                    if (e.key === "Escape") renamingGroup = null;
+                  }}
+                />
+              {:else}
+                <button class:active={selectedGroup === g} on:click={() => (selectedGroup = g)}>
+                  {g}
+                  <!-- svelte-ignore a11y-click-events-have-key-events -->
+                  <!-- svelte-ignore a11y-no-static-element-interactions -->
+                  <span
+                    class="rename-icon"
+                    title="Rename group"
+                    on:click|stopPropagation={() => startRename(g)}>✎</span
+                  >
+                </button>
+              {/if}
+            {/each}
+          </div>
+        {/if}
+
         <div class="grid">
-          {#each cameras as camera (camera.id)}
+          {#each visibleCameras as camera (camera.id)}
             <div
               class="grid-item"
               class:dragging={draggedId === camera.id}
@@ -318,6 +398,44 @@
   .count {
     color: var(--text-dim);
     font-size: 0.85rem;
+  }
+  .group-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-bottom: 1.1rem;
+  }
+  .group-tabs button {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 0.35rem 0.7rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+  }
+  .group-tabs button.active {
+    background: var(--surface-2);
+    color: var(--text);
+    border-color: var(--accent);
+  }
+  .rename-icon {
+    opacity: 0.5;
+    font-size: 0.72rem;
+  }
+  .rename-icon:hover {
+    opacity: 1;
+  }
+  .group-rename {
+    background: var(--bg);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    padding: 0.35rem 0.7rem;
+    font-size: 0.8rem;
+    color: var(--text);
+    width: 140px;
   }
   .grid {
     display: grid;

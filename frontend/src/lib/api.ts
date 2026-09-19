@@ -31,6 +31,7 @@ export interface Camera {
   motion: MotionSettings;
   rotation: Rotation;
   sort_order: number;
+  group?: string;
   status?: "idle" | "streaming" | "error";
 }
 
@@ -38,6 +39,9 @@ export interface RecordingInfo {
   filename: string;
   size_bytes: number;
   modified: string;
+  // Approximate (modified - segment_seconds) - see the backend's
+  // RecordingInfo docs. Good enough to place segments on a timeline.
+  started_at: string;
 }
 
 export interface MotionEvent {
@@ -56,6 +60,16 @@ export interface UpdateCameraRequest {
   recording?: RecordingSettings;
   motion?: MotionSettings;
   rotation?: Rotation;
+  group?: string;
+}
+
+export type CameraOverviewStatus = "streaming" | "error" | "online" | "offline";
+
+export interface CameraStatusInfo {
+  id: string;
+  name: string;
+  kind: "usb" | "rtsp";
+  status: CameraOverviewStatus;
 }
 
 const BASE = "/api";
@@ -119,6 +133,22 @@ export async function deleteCamera(id: string): Promise<void> {
   const res = await fetch(`${BASE}/cameras/${id}`, { method: "DELETE" });
   if (!res.ok && res.status !== 204) {
     throw new Error(`failed to delete camera: ${res.status}`);
+  }
+}
+
+export async function getCamerasStatus(): Promise<CameraStatusInfo[]> {
+  return unwrap(await fetch(`${BASE}/cameras/status`), "failed to load camera status");
+}
+
+export async function renameCameraGroup(oldName: string, newName: string): Promise<void> {
+  const res = await fetch(`${BASE}/camera-groups/rename`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ old_name: oldName, new_name: newName }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `failed to rename group: ${res.status}`);
   }
 }
 

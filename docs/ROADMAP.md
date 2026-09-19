@@ -276,17 +276,38 @@ service, in order of what shipped:
       from "Ignored USB devices" in the sidebar. Verified live: delete →
       rescan doesn't bring it back → un-ignore → rescan does.
 
-## Later / unscheduled (dashboard)
+## v0.10 - recording timeline, camera groups, status overview - done
 
-- [ ] Recording timeline: a continuous scrubbable timeline (Protect-
-      style) instead of a flat list of segment files to download -
-      needs a timeline UI component and a backend way to map a clicked
-      time to the right segment + byte offset.
-- [ ] Camera tabs/groups for organization - needs a "group" concept in
-      the DB (not just a client-side filter) and group-management UI.
-- [ ] Status overview tab (all cameras' online/offline/USB-vs-network
-      status, no video) - needs the supervisor to expose per-camera
-      health beyond "is a viewer currently attached."
+The three items deferred from v0.9 as "bigger, own milestone":
+
+- [x] **Recording timeline**: `RecordingTimeline.svelte` renders a
+      per-day scrubbable timeline (like Protect's) instead of only a flat
+      segment list - clicking a point plays the containing segment from
+      the right offset. Segment placement uses a new `RecordingInfo.
+      started_at` (`modified - segment_seconds`, since `splitmuxsink`
+      doesn't record each segment's exact start anywhere) - exact for a
+      finalized segment, approximate for the one currently being written;
+      see `docs/ARCHITECTURE.md` for the honest limitation. Motion events
+      (which *do* have exact timestamps from the DB) are overlaid on the
+      same timeline. The existing segment list/player stays as-is
+      alongside it, not replaced.
+- [x] **Camera groups**: `Camera::group`, a plain optional string rather
+      than a normalized `groups` table (nothing else needs to reference
+      a group by id) - shown as dashboard tabs, computed from whatever
+      distinct values currently exist across cameras. Renaming a tab
+      (`Db::rename_camera_group`) bulk-updates every camera that has the
+      old name in one query, so the UX isn't "rename N cameras one at a
+      time." Verified live: set on two cameras, rename, clear.
+- [x] **Status overview tab**: `GET /api/cameras/status` - exact for a
+      camera with a pipeline running (`Supervisor::pipeline_status`,
+      reusing the existing capture-error watch channel), a cheap
+      best-effort presence probe otherwise (`reachability::
+      probe_reachable`: does the USB device node still exist, or does a
+      plain TCP connect to the RTSP host succeed within 2s) rather than
+      actually opening the device/stream just to answer a status page.
+      Verified live against both a real USB camera (online) and a
+      deliberately unreachable RTSP address, TEST-NET `192.0.2.55`
+      (offline, correctly took ~2s to time out).
 
 ## Later / unscheduled
 

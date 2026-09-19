@@ -7,16 +7,18 @@ for a Ubiquiti-Protect-style dashboard UI/UX with **USB webcams treated as
 first-class cameras** - plug in a UVC camera over USB and it gets the same
 live-preview and recording pipeline a network/RTSP camera would.
 
-Status: **Alpha (v0.9)**. Live preview over WebRTC (trickle ICE, with
+Status: **Alpha (v0.10)**. Live preview over WebRTC (trickle ICE, with
 click-to-expand and live-view zoom), drag-and-drop dashboard reordering,
-camera rotation, continuous or motion-triggered segmented recording with
-retention, motion detection with webhook alerts, single-account login
-with brute-force lockout, an authenticated RTSP server that re-serves
-every camera (USB included) to third-party NVR/VMS/player software, and
-ONVIF network-camera discovery all work end-to-end for USB *and* RTSP
-cameras (most WiFi/PoE IP cameras speak RTSP - that's the protocol this
-targets for network cameras). Installable as a systemd service (see
-below). See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next and
+camera groups/tabs, a no-video status overview (online/offline/USB vs
+network), camera rotation, continuous or motion-triggered segmented
+recording with a scrubbable per-day timeline and retention, motion
+detection with webhook alerts, single-account login with brute-force
+lockout, an authenticated RTSP server that re-serves every camera (USB
+included) to third-party NVR/VMS/player software, and ONVIF
+network-camera discovery all work end-to-end for USB *and* RTSP cameras
+(most WiFi/PoE IP cameras speak RTSP - that's the protocol this targets
+for network cameras). Installable as a systemd service (see below). See
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how it's built and
 why.
 
@@ -140,12 +142,17 @@ ONVIF - it'll list any camera that answers on the LAN by IP address so
 you don't have to go find that in your router's DHCP client list.
 Click the gear icon on a camera tile to turn on recording (continuous, or
 only while motion is detected) and set a retention limit (max age and/or
-max total size), and to turn on motion detection/webhook alerts
-independently of recording, and to rotate a camera mounted sideways or
-upside down. Click a live tile to open it full-size, with scroll to
-zoom and drag to pan (live view only - doesn't affect recordings).
-Drag tiles to reorder the dashboard. Click the record icon to browse/play
-back recordings and view the motion event log. Every camera is also
+max total size), to turn on motion detection/webhook alerts independently
+of recording, to rotate a camera mounted sideways or upside down, and to
+put it in a group - shown as a tab above the dashboard grid, click the ✎
+next to a tab name to rename it. Click a live tile to open it full-size,
+with scroll to zoom and drag to pan (live view only - doesn't affect
+recordings). Drag tiles to reorder the dashboard. "Status" in the sidebar
+gives a no-video overview of every camera's reachability
+(online/offline/streaming/error) without opening a live view for each
+one. Click the record icon to browse/play back recordings on a
+scrubbable per-day timeline (click a point to play from there) and view
+the motion event log, overlaid on the same timeline. Every camera is also
 available to any RTSP client at `rtsp://<host>:5544/<camera-id>` (its id
 from `GET /api/cameras`), authenticated with the RTSP credential above -
 try `ffplay rtsp://rtsp:<password>@<host>:5544/<camera-id>` or add it in
@@ -208,16 +215,18 @@ cd frontend && npm install && npm run dev
 |--------|--------------------------------------|-------------------------------------------|
 | GET    | `/api/config`                        | Server config (ports, data dir).          |
 | GET    | `/api/cameras`                       | List cameras.                             |
+| GET    | `/api/cameras/status`                | No-video status per camera: `{id, name, kind, status}` (streaming/error/online/offline). |
 | POST   | `/api/cameras`                       | Add an RTSP camera: `{name, url}`.        |
-| PATCH  | `/api/cameras/:id`                   | Update name/url/resolution/recording settings; restarts the camera's pipeline if it's running. |
+| PATCH  | `/api/cameras/:id`                   | Update name/url/resolution/recording/rotation/group settings; restarts the camera's pipeline if it's running. |
 | POST   | `/api/cameras/discover`              | Re-scan for USB cameras.                  |
 | PUT    | `/api/cameras/reorder`               | `{ids: [uuid, ...]}` - full new dashboard order. |
+| POST   | `/api/camera-groups/rename`          | `{old_name, new_name}` - bulk-rename a group tab. |
 | POST   | `/api/onvif/discover`                | Scan the LAN for ONVIF cameras (~3s), returns `[{address, xaddrs}]`. |
 | GET    | `/api/ignored-usb-devices`           | List USB device paths excluded from auto-discovery. |
 | POST   | `/api/ignored-usb-devices/unignore`  | `{device_path}` - make a device eligible for discovery again. |
 | DELETE | `/api/cameras/:id`                   | Remove a camera (a USB camera is also added to the ignore list above). |
 | WS     | `/api/stream/:camera_id`             | WebRTC signaling for that camera's live preview. |
-| GET    | `/api/cameras/:id/recordings`        | List a camera's recorded segments.        |
+| GET    | `/api/cameras/:id/recordings`        | List a camera's recorded segments (with approximate `started_at` for the timeline). |
 | GET    | `/api/recordings/:id/:filename`      | Download/stream a segment (Range-request/seekable). |
 | DELETE | `/api/recordings/:id/:filename`      | Delete a segment.                         |
 | GET    | `/api/cameras/:id/motion`            | `{"active": bool}` - is motion currently detected. |

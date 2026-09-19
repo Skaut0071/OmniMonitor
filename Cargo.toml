@@ -54,6 +54,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 argon2 = "0.5"
 rand = "0.8"
 sha2 = "0.10"
+url = "2"
 
 omni-core = { path = "crates/omni-core" }
 omni-db = { path = "crates/omni-db" }

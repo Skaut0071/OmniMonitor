@@ -748,7 +748,65 @@ Reviewed and deliberately left as-is, with reasoning:
   (`Db::unignore_usb_device`) - the device becomes eligible for
   discovery again but isn't re-added until the next actual rescan.
 
-## Known limitations / honest gaps in v0.9
+## Recording timeline, camera groups, status overview (v0.10)
+
+- **Recording timeline placement is approximate, on purpose.**
+  `splitmuxsink` never records each segment's exact start time anywhere
+  (not in the filename - `<run-started-unix>-%05d.webm` only encodes
+  when the *pipeline run* started, not each fragment - and not in any
+  sidecar metadata). `RecordingInfo.started_at` is computed as
+  `file_mtime - segment_seconds` in `list_recordings`. This is exact for
+  a segment that's already finalized (its mtime stops advancing once
+  `splitmuxsink` rolls over to the next file, sitting at the moment the
+  last byte was written - subtracting the nominal segment length back
+  out from that gives the real start), but is *not* exact for whichever
+  segment is currently still being written (its mtime keeps advancing
+  toward "now" as data streams in, rather than jumping to a stable
+  "finished" value) - confirmed by checking a real in-progress segment's
+  mtime during testing rather than assuming. `RecordingTimeline.svelte`
+  places blocks using this value; clicking one seeks to
+  `clicked_time - segment.started_at` seconds into that file. The exact
+  fix (having the capture pipeline itself record each fragment's real
+  start, e.g. via `splitmuxsink`'s `format-location-full` signal, into a
+  `recording_segments` table) is real additional work - a new signal
+  handler wired into `omni-capture::pipeline`, DB writes on every
+  fragment boundary, and keeping the retention reaper's direct
+  filesystem deletes in sync with that table - deferred until the
+  approximation actually causes a problem in practice.
+
+- **Camera groups are a plain string, not a normalized table.**
+  `Camera::group: Option<String>` - nothing else in the schema needs to
+  reference a group by id (no per-group settings, no group-level
+  permissions), so a `groups` table would only add a join for no benefit.
+  The frontend's group tabs are just `[...new Set(cameras.map(c =>
+  c.group))]` - a group "exists" exactly when some camera currently has
+  that string set, and stops existing the moment the last camera with it
+  is moved out or deleted. Renaming a tab
+  (`POST /api/camera-groups/rename`, `Db::rename_camera_group`) is a
+  single `UPDATE cameras SET camera_group = ? WHERE camera_group = ?`,
+  not a cascade - there's nothing else that could reference the old name.
+
+- **Status overview trades exactness for cost, deliberately, for an idle
+  camera.** A camera with a pipeline currently running gets an exact
+  answer for free (`Supervisor::pipeline_status` just reads the same
+  capture-error watch channel viewers already watch). A camera with no
+  pipeline running - the common case for anything that isn't recording,
+  motion-detecting, or currently being watched - would need the status
+  page to actually open the device or connect to it to know anything for
+  certain, which this deliberately doesn't do (spinning up a real capture
+  pipeline just to populate a status table would be far more invasive
+  than the question deserves, and for a USB camera would contend with
+  whatever else might have it open - see the "device busy" issue noted
+  in v0.9's testing). Instead `reachability::probe_reachable` does the
+  cheapest presence check available per camera kind: a USB device's
+  `stat()` (does `/dev/videoN` still exist), or a plain TCP connect with
+  a 2-second timeout for an RTSP camera's host:port. Neither confirms the
+  camera will actually *stream* successfully - a wedged UVC device or an
+  RTSP host that accepts TCP connections but rejects the RTSP handshake
+  both read as "online." Good enough to answer "is this camera even
+  there," not a substitute for actually trying to view it.
+
+## Known limitations / honest gaps in v0.10
 
 - **Single admin account and single RTSP credential, not
   per-camera or per-user permissions** - every camera's RTSP mount point

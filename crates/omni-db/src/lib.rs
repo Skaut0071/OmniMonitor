@@ -58,6 +58,7 @@ struct CameraRow {
     motion_webhook_url: Option<String>,
     rotation: String,
     sort_order: i64,
+    camera_group: Option<String>,
 }
 
 impl TryFrom<CameraRow> for Camera {
@@ -117,6 +118,7 @@ impl TryFrom<CameraRow> for Camera {
             },
             rotation,
             sort_order: row.sort_order,
+            group: row.camera_group,
             status: None,
         })
     }
@@ -271,6 +273,8 @@ impl Db {
             // v0.9: rotation and manual dashboard ordering.
             "ALTER TABLE cameras ADD COLUMN rotation TEXT NOT NULL DEFAULT 'none'",
             "ALTER TABLE cameras ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+            // v0.10: organizational groups/tabs.
+            "ALTER TABLE cameras ADD COLUMN camera_group TEXT",
         ] {
             if let Err(err) = sqlx::query(stmt).execute(&self.pool).await {
                 let msg = err.to_string();
@@ -336,9 +340,9 @@ impl Db {
                 recording_enabled, recording_trigger, segment_seconds,
                 retention_max_age_secs, retention_max_size_bytes,
                 motion_enabled, motion_sensitivity, motion_webhook_url,
-                rotation, sort_order
+                rotation, sort_order, camera_group
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 kind = excluded.kind,
@@ -358,7 +362,8 @@ impl Db {
                 motion_sensitivity = excluded.motion_sensitivity,
                 motion_webhook_url = excluded.motion_webhook_url,
                 rotation = excluded.rotation,
-                sort_order = excluded.sort_order
+                sort_order = excluded.sort_order,
+                camera_group = excluded.camera_group
             "#,
         )
         .bind(camera.id.to_string())
@@ -381,8 +386,22 @@ impl Db {
         .bind(&camera.motion.webhook_url)
         .bind(rotation)
         .bind(camera.sort_order)
+        .bind(&camera.group)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Bulk-renames a group across every camera that currently has it -
+    /// there's no separate `groups` table to rename a row in (see
+    /// `omni_core::Camera::group`'s docs for why), so "rename this tab"
+    /// means updating every camera tagged with the old name at once.
+    pub async fn rename_camera_group(&self, old_name: &str, new_name: &str) -> Result<()> {
+        sqlx::query("UPDATE cameras SET camera_group = ? WHERE camera_group = ?")
+            .bind(new_name)
+            .bind(old_name)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

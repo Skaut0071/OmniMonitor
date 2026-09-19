@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from "svelte";
+  import RecordingTimeline from "./RecordingTimeline.svelte";
   import {
     deleteRecording,
     listMotionEvents,
@@ -19,6 +20,20 @@
   let loading = true;
   let loadError = "";
   let selected: RecordingInfo | null = null;
+  let seekToSeconds: number | null = null;
+  let videoEl: HTMLVideoElement | undefined;
+
+  function onTimelineSeek(e: CustomEvent<{ recording: RecordingInfo; offsetSeconds: number }>) {
+    selected = e.detail.recording;
+    seekToSeconds = e.detail.offsetSeconds;
+  }
+
+  function onVideoLoaded() {
+    if (seekToSeconds != null && videoEl) {
+      videoEl.currentTime = seekToSeconds;
+      seekToSeconds = null;
+    }
+  }
 
   let events: MotionEvent[] = [];
   let eventsLoading = true;
@@ -121,6 +136,12 @@
             : " Recording is turned off for this camera."}
         </p>
       {:else}
+        <RecordingTimeline
+          {recordings}
+          {events}
+          segmentSeconds={camera.recording.segment_seconds}
+          on:seek={onTimelineSeek}
+        />
         <div class="body">
           <div class="list">
             {#each recordings as rec (rec.filename)}
@@ -136,7 +157,13 @@
           <div class="player">
             {#if selected}
               <!-- svelte-ignore a11y-media-has-caption -->
-              <video src={recordingUrl(camera.id, selected.filename)} controls autoplay></video>
+              <video
+                bind:this={videoEl}
+                src={recordingUrl(camera.id, selected.filename)}
+                controls
+                autoplay
+                on:loadedmetadata={onVideoLoaded}
+              ></video>
               <a class="download" href={recordingUrl(camera.id, selected.filename)} download
                 >Download segment</a
               >

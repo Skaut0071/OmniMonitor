@@ -32,3 +32,4 @@ gstreamer = { workspace = true }
 gstreamer-app = { workspace = true }
 gstreamer-rtsp-server = { workspace = true }
 glib = "0.20"
+url = { workspace = true }

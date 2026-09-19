@@ -140,6 +140,14 @@ pub struct Camera {
     /// `PUT /api/cameras/reorder`, not directly.
     #[serde(default)]
     pub sort_order: i64,
+    /// Freeform organizational tag shown as a dashboard tab - deliberately
+    /// just a string on each camera rather than a normalized `groups`
+    /// table with its own id: nothing else needs to reference a group by
+    /// id, and "rename this tab" is just a bulk find-and-replace across
+    /// whichever cameras currently have the old name (see
+    /// `Db::rename_camera_group`). `None`/empty means ungrouped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<CameraStatus>,
 }
@@ -161,6 +169,7 @@ impl Camera {
             motion: MotionSettings::default(),
             rotation: Rotation::default(),
             sort_order: 0,
+            group: None,
             status: None,
         }
     }

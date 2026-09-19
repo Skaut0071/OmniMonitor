@@ -26,6 +26,8 @@ pub enum ValidationError {
     InvalidWebhookUrl,
     #[error("password must be at least 8 characters")]
     PasswordTooShort,
+    #[error("group name must be 64 characters or fewer")]
+    GroupNameTooLong,
 }
 
 pub fn validate_camera_name(name: &str) -> Result<(), ValidationError> {
@@ -43,6 +45,16 @@ pub fn validate_camera_name(name: &str) -> Result<(), ValidationError> {
 /// `PATCH /api/cameras/:id` can't request an absurd resolution (e.g.
 /// billions of pixels) and have the GStreamer pipeline try to allocate
 /// buffers for it - cheap to check, and no real camera exceeds this.
+/// Unlike `validate_camera_name`, empty is valid here - it means "clear
+/// the group" (make the camera ungrouped again), checked by the caller
+/// separately from validation.
+pub fn validate_group_name(name: &str) -> Result<(), ValidationError> {
+    if name.trim().chars().count() > 64 {
+        return Err(ValidationError::GroupNameTooLong);
+    }
+    Ok(())
+}
+
 pub fn validate_resolution(width: u32, height: u32) -> Result<(), ValidationError> {
     const MAX_DIMENSION: u32 = 7680;
     if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {

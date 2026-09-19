@@ -5,6 +5,7 @@
     validate_segment_seconds,
     validate_sensitivity,
     validate_webhook_url,
+    validate_group_name,
   } from "./wasm/omni_wasm.js";
   import { updateCamera, type Camera, type RecordingTrigger, type Rotation } from "./api";
 
@@ -37,6 +38,7 @@
   let webhookUrl = camera.motion.webhook_url ?? "";
 
   let rotation: Rotation = camera.rotation;
+  let group = camera.group ?? "";
 
   let ageEnabled = camera.recording.retention_max_age_secs != null;
   let ageValue = camera.recording.retention_max_age_secs
@@ -69,6 +71,7 @@
     const maxAgeSecs = ageEnabled ? Math.round(ageValue * AGE_UNIT_SECONDS[ageUnit]) : null;
     const maxSizeBytes = sizeEnabled ? Math.round(sizeValue * SIZE_UNIT_BYTES[sizeUnit]) : null;
     const trimmedWebhook = webhookUrl.trim();
+    const trimmedGroup = group.trim();
 
     try {
       validate_segment_seconds(segmentSeconds);
@@ -81,6 +84,7 @@
       if (trimmedWebhook) {
         validate_webhook_url(trimmedWebhook);
       }
+      validate_group_name(trimmedGroup);
     } catch (e) {
       error = (e as Error).message;
       return;
@@ -102,6 +106,7 @@
           webhook_url: trimmedWebhook || null,
         },
         rotation,
+        group: trimmedGroup,
       });
       dispatch("updated");
       dispatch("close");
@@ -209,6 +214,17 @@
       For a camera mounted sideways or upside down. Applied to the live view, recordings, and RTSP
       alike - takes effect after saving, disconnecting anyone currently watching this camera.
     </p>
+
+    <label>
+      Group (optional)
+      <input
+        type="text"
+        bind:value={group}
+        placeholder="e.g. Front yard"
+        disabled={!wasmReady}
+      />
+    </label>
+    <p class="hint">Shown as a tab on the dashboard. Leave blank to keep this camera ungrouped.</p>
 
     <hr />
 

@@ -122,6 +122,23 @@ impl Supervisor {
         self.data_dir.join("recordings").join(camera_id.to_string())
     }
 
+    /// The running pipeline's health for a camera, or `None` if no
+    /// pipeline is currently running for it at all (an ephemeral camera
+    /// with no viewers and no recording/motion enabled spends most of its
+    /// time in exactly this state - it isn't "broken", just idle). See
+    /// `crate::reachability` for how the status API turns this into a
+    /// full online/offline/error/streaming answer even for a camera with
+    /// no pipeline instantiated right now.
+    pub async fn pipeline_status(&self, camera_id: Uuid) -> Option<omni_core::CameraStatus> {
+        let map = self.cameras.read().await;
+        let managed = map.get(&camera_id)?;
+        Some(if managed.capture_error.borrow().is_some() {
+            omni_core::CameraStatus::Error
+        } else {
+            omni_core::CameraStatus::Streaming
+        })
+    }
+
     /// Whether motion is considered active right now for a camera, per
     /// its currently-running pipeline (if any - a camera with no pipeline
     /// running has no opinion, reported as inactive).
