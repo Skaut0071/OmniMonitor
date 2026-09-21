@@ -707,10 +707,48 @@ Reviewed and deliberately left as-is, with reasoning:
   configured resolution with the rotated content inside it, and rotation
   affects the live view, recordings, and the RTSP re-serve identically
   (it's one shared pipeline, see "One shared pipeline per camera" above).
-  `videoflip`'s `method` property (`identity`/`clockwise`/`rotate-180`/
+  `videoflip`'s `method` property (`none`/`clockwise`/`rotate-180`/
   `counterclockwise`) maps directly from the four `Rotation` variants.
 
-  Verifying this surfaced a real, separate, pre-existing bug: the RTSP
+  **A real regression shipped here and stayed live for two days**:
+  `Rotation::None` was originally mapped to the nick `"identity"`, not
+  `"none"` - an understandable mix-up (`videoflip`'s own enum
+  documentation describes value 0 as "Identity (no rotation)", and
+  `identity` is also a real, different GStreamer element, a no-op
+  passthrough, which made the wrong value look even more plausible when
+  writing it) but wrong: `"identity"` isn't a valid nick for this
+  property, and `gst_parse_launch` rejects it outright with `could not
+  set property "method" in element "videoflip" to "identity"` - before
+  the pipeline ever reaches `PLAYING`, before it even opens the capture
+  device. Since `Rotation::None` is every camera's default, this broke
+  *every* camera's pipeline the moment v0.9 shipped it, not just rotated
+  ones - live view, recording, and RTSP all equally broken, from a
+  one-word bug in a feature most users would never have touched.
+  - It passed v0.9's own testing because the verification only grepped
+    logs for the `"generated pipeline description"` line to confirm the
+    right `videoflip method=...` string was being built, and never
+    checked whether the pipeline actually reached a playing/streaming
+    state afterward - so a real hardware "device busy" issue hit in the
+    same test session (see below) fully masked this earlier, unrelated
+    failure sitting right above it in the same log.
+  - Caught days later when the person running this as an actual systemd
+    service (not a quick dev-loop `cargo run`) reported both cameras
+    stuck at "connecting" with no video - `journalctl -u omnimonitor`
+    had the exact `could not set property ... "identity"` error sitting
+    in plain sight. Fixed by using the correct nick (`"none"`) and
+    confirmed against `gst-inspect-1.0 videoflip`'s actual property
+    definition instead of memory, this time.
+  - The lesson carried forward: a pipeline *description string* being
+    correct proves nothing about whether GStreamer will actually accept
+    it - `omni_capture::pipeline`'s existing tests only cover the pure
+    frame-diff logic, not pipeline construction, and there's still no
+    automated check that a generated description successfully reaches
+    `PLAYING`. Worth a real integration test (build every `Rotation`
+    variant's pipeline against a `videotestsrc` and assert
+    `set_state(Playing)` succeeds) rather than relying on manual
+    end-to-end runs catching this class of bug before it ships.
+
+  Verifying rotation also surfaced a real, separate, pre-existing bug: the RTSP
   server's `RTSPMediaFactory::connect_media_configure` callback closes
   over the `Camera` value passed to `RtspServer::add_camera` **by value**
   at registration time, and reuses that same snapshot for every future

@@ -187,7 +187,16 @@ pub struct PipelineConfig {
 /// camera physically mounted sideways/upside down should be corrected).
 fn videoflip_method(rotation: omni_core::Rotation) -> &'static str {
     match rotation {
-        omni_core::Rotation::None => "identity",
+        // `videoflip`'s enum nick for "no rotation" is "none" - its
+        // human-readable description happens to say "Identity (no
+        // rotation)", which is what led to using the wrong nick
+        // ("identity") here originally. That's a distinct, real GStreamer
+        // element (a no-op passthrough), not a valid value for this
+        // property, and `gst_parse_launch` rejects it: "could not set
+        // property \"method\" in element \"videoflip\" to \"identity\"" -
+        // confirmed against `gst-inspect-1.0 videoflip`'s actual enum
+        // nicks, not just assumed a second time.
+        omni_core::Rotation::None => "none",
         omni_core::Rotation::Clockwise90 => "clockwise",
         omni_core::Rotation::Rotate180 => "rotate-180",
         omni_core::Rotation::CounterClockwise90 => "counterclockwise",
@@ -491,5 +500,47 @@ mod tests {
     #[test]
     fn higher_sensitivity_requires_smaller_fraction() {
         assert!(motion_required_fraction(100) < motion_required_fraction(1));
+    }
+
+    /// Regression test for a real bug that shipped in v0.9:
+    /// `Rotation::None` mapped to the `videoflip` nick `"identity"`,
+    /// which isn't valid (the correct nick is `"none"` - `videoflip`'s
+    /// own docs describe it as "Identity (no rotation)", which is what
+    /// led to the wrong value). That broke every camera's pipeline by
+    /// default (`Rotation::None` is the default), but the bug survived
+    /// v0.9's own testing because nothing actually checked that a
+    /// generated pipeline *description* was accepted by GStreamer, only
+    /// that the expected string got built - see docs/ARCHITECTURE.md's
+    /// "Dashboard UX" section for the full postmortem.
+    ///
+    /// Uses `videotestsrc` (no real camera needed) with the exact same
+    /// `videoflip method={...}` fragment `gst_bin_description`/`start`
+    /// would generate, and asserts `gst::parse::launch` - the same call
+    /// `CaptureSession::start` makes - accepts it. This is the level a
+    /// property-name typo like this actually gets caught at: parsing,
+    /// not "does the resulting frame look rotated."
+    #[test]
+    fn every_rotation_is_a_valid_videoflip_method() {
+        omni_gstreamer_test_init();
+        for rotation in [
+            omni_core::Rotation::None,
+            omni_core::Rotation::Clockwise90,
+            omni_core::Rotation::Rotate180,
+            omni_core::Rotation::CounterClockwise90,
+        ] {
+            let method = videoflip_method(rotation);
+            let description =
+                format!("videotestsrc num-buffers=1 ! videoflip method={method} ! fakesink");
+            gst::parse::launch(&description).unwrap_or_else(|e| {
+                panic!("rotation {rotation:?} (videoflip method={method:?}) rejected by gst_parse_launch: {e}")
+            });
+        }
+    }
+
+    fn omni_gstreamer_test_init() {
+        // `gst::init()` is safe to call more than once (idempotent), so
+        // every test in this module that needs it can just call this
+        // rather than relying on test ordering or a shared harness.
+        gst::init().expect("gstreamer init failed - is it installed?");
     }
 }
