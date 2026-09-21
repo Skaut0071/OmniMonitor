@@ -858,6 +858,63 @@ Reviewed and deliberately left as-is, with reasoning:
   both read as "online." Good enough to answer "is this camera even
   there," not a substitute for actually trying to view it.
 
+## Post-v0.10 fixes: settings-change auto-retry, rotated aspect ratio, mobile UI
+
+Feedback from real day-to-day use of v0.10 (alongside the `videoflip`
+regression covered above):
+
+- **Every settings change - not just rotation - required a manual
+  "Retry" click.** `Supervisor::restart_if_running`/`replace_pipeline`
+  deliberately disconnect active viewers on any settings change (see
+  "One shared pipeline per camera" above), sending the exact message
+  `"camera settings changed; please reconnect"`. That's still the right
+  behavior architecturally, but making the *user* notice a hard error
+  tile and click through it for a change they just made themselves was
+  needless friction, especially once rotation made settings changes a
+  much more common action. `CameraTile` and `ExpandedCameraModal` now
+  reconnect automatically when they see that exact message (exported as
+  `webrtc-view.ts`'s `SETTINGS_CHANGED_MESSAGE`, checked by string
+  equality) - any other error still shows a manual Retry, so a real
+  device/network failure doesn't turn into a silent retry loop against a
+  camera that isn't coming back.
+
+- **A 90°/270° rotation stretched the image** instead of just rotating
+  it. `videoflip` runs before the `videoscale` that fits the result to
+  `camera.width`/`height` (see the rotation section above) - fine for
+  180° (same aspect ratio either way), but for 90°/270° the rotated
+  content is naturally portrait-shaped while the target box stayed
+  whatever landscape resolution the camera was configured with,
+  so `videoscale` had to squash one axis to fit. Fixed in
+  `Supervisor::pipeline_config` by swapping the target width/height for
+  a 90°/270° rotation before building `PipelineConfig`, so the actual
+  encoded output (live view, recordings, RTSP - all one pipeline) is
+  correctly portrait-shaped instead of deformed. Verified against a real
+  camera: `ffprobe` against the RTSP mount reports `720x1280` for a
+  1280x720 camera rotated 90°, and `1280x720` unchanged at 180°.
+
+- **Mobile-friendly UI.** The sidebar was a permanently-visible 220px
+  column, which on a phone-width viewport left less width for content
+  than the sidebar itself took - not just cramped, often unusable. Below
+  760px it's now an off-canvas drawer (`.sidebar.open`, `transform:
+  translateX`) behind a hamburger button in a new sticky top bar, closed
+  automatically by a backdrop tap or by any nav link/action inside it.
+  The camera grid's column minimum uses `minmax(min(320px, 100%), 1fr)`
+  so it can't force horizontal scrolling below 320px. Every modal's
+  fixed pixel width became `min(Npx, 100%)` with backdrop gutter padding
+  added where it was missing; `CameraSettingsModal` (the tallest, now
+  with rotation and group fields too) gained `max-height: 90vh` +
+  internal scroll; `RecordingsModal`'s side-by-side list/player stacks
+  vertically below 640px; the status table drops its `min-width` floor
+  below 480px so the name column wraps instead of the `Status` column
+  running off-screen with no visible way to reach it. Verified visually,
+  not just by reading the CSS: installed a headless Chromium (`npx
+  playwright install chromium`) and screenshotted the actual running app
+  at a 375×667 viewport - the drawer, status table overflow, and the
+  settings modal's scroll were all things the screenshots caught that
+  looked fine on paper, especially the status table, whose first version
+  overflowed off-screen with no visible scrollbar despite technically
+  being scrollable.
+
 ## Known limitations / honest gaps in v0.10
 
 - **Single admin account and single RTSP credential, not

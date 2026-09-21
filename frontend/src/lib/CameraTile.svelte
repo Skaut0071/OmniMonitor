@@ -2,7 +2,7 @@
   import { createEventDispatcher, onDestroy, onMount } from "svelte";
   import type { Camera } from "./api";
   import { getMotionStatus } from "./api";
-  import { connectCameraView, type CameraViewConnection } from "./webrtc-view";
+  import { connectCameraView, SETTINGS_CHANGED_MESSAGE, type CameraViewConnection } from "./webrtc-view";
 
   export let camera: Camera;
 
@@ -20,7 +20,15 @@
     errorMessage = "";
     connection = connectCameraView(camera.id, videoEl, {
       onStatusChange: (s) => (status = s),
-      onError: (message) => (errorMessage = message),
+      onError: (message) => {
+        errorMessage = message;
+        // Not a real failure - reconnect automatically instead of
+        // making the user notice and click "Retry" for a settings
+        // change (e.g. rotation) they just made themselves.
+        if (message === SETTINGS_CHANGED_MESSAGE) {
+          retry();
+        }
+      },
     });
   }
 

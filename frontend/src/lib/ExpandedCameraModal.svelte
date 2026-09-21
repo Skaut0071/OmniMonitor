@@ -1,7 +1,12 @@
 <script lang="ts">
   import { createEventDispatcher, onDestroy, onMount } from "svelte";
   import type { Camera } from "./api";
-  import { connectCameraView, type CameraViewConnection, type CameraViewStatus } from "./webrtc-view";
+  import {
+    connectCameraView,
+    SETTINGS_CHANGED_MESSAGE,
+    type CameraViewConnection,
+    type CameraViewStatus,
+  } from "./webrtc-view";
 
   export let camera: Camera;
 
@@ -83,12 +88,24 @@
     if (e.key === "Escape") dispatch("close");
   }
 
-  onMount(() => {
+  function connect() {
+    errorMessage = "";
     connection = connectCameraView(camera.id, videoEl, {
       onStatusChange: (s) => (status = s),
-      onError: (message) => (errorMessage = message),
+      onError: (message) => {
+        errorMessage = message;
+        // Not a real failure - the server tore this viewer down because
+        // the camera's settings changed (e.g. rotation), so reconnect
+        // automatically instead of leaving the expanded view stuck.
+        if (message === SETTINGS_CHANGED_MESSAGE) {
+          connection?.disconnect();
+          connect();
+        }
+      },
     });
-  });
+  }
+
+  onMount(connect);
 
   onDestroy(() => {
     connection?.disconnect();
@@ -157,6 +174,11 @@
     justify-content: center;
     z-index: 60;
     padding: 2rem;
+  }
+  @media (max-width: 640px) {
+    .backdrop {
+      padding: 0.75rem;
+    }
   }
   .modal {
     background: var(--surface);

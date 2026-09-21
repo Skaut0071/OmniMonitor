@@ -173,10 +173,31 @@ impl Supervisor {
             initial_active: motion_active_now,
         });
 
+        // `camera.width`/`height` is the resolution the user picked for
+        // the *unrotated* sensor image (e.g. 1280x720 from a landscape
+        // USB camera). `videoflip` runs before the scale to that target
+        // in the pipeline (see omni-capture::pipeline), so if the target
+        // box stays 1280x720 while the content itself is rotated 90/270
+        // (now naturally 720x1280-shaped), videoscale has to squash a
+        // portrait image into a landscape box - visibly stretched, not
+        // just letterboxed. Swapping the target dimensions for a 90/270
+        // rotation instead gives the encoded output (live view,
+        // recordings, RTSP - all one pipeline) the correct portrait
+        // shape, so nothing downstream has to deform it. 180° keeps the
+        // same aspect as unrotated, so it doesn't need this.
+        let (width, height) = match camera.rotation {
+            omni_core::Rotation::Clockwise90 | omni_core::Rotation::CounterClockwise90 => {
+                (camera.height, camera.width)
+            }
+            omni_core::Rotation::None | omni_core::Rotation::Rotate180 => {
+                (camera.width, camera.height)
+            }
+        };
+
         PipelineConfig {
             source,
-            width: camera.width,
-            height: camera.height,
+            width,
+            height,
             framerate: camera.framerate,
             bitrate: DEFAULT_BITRATE,
             recording,

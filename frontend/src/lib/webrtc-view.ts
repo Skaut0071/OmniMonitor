@@ -8,6 +8,14 @@ import { streamWsUrl } from "./api";
 
 export type CameraViewStatus = "connecting" | "live" | "error";
 
+// The server sends this exact message (see omni-server::supervisor's
+// merge_end_signals) when it intentionally tore down a viewer's pipeline
+// because the camera's settings changed - not a failure, so a viewer
+// should reconnect automatically rather than show a hard error the user
+// has to click through. Exported so both CameraTile and
+// ExpandedCameraModal check for it the same way.
+export const SETTINGS_CHANGED_MESSAGE = "camera settings changed; please reconnect";
+
 export interface CameraViewHandlers {
   onStatusChange: (status: CameraViewStatus) => void;
   onError: (message: string) => void;

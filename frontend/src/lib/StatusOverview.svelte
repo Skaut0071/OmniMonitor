@@ -59,26 +59,28 @@
   {:else if statuses.length === 0}
     <p class="hint">No cameras yet.</p>
   {:else}
-    <table>
-      <thead>
-        <tr>
-          <th>Camera</th>
-          <th>Type</th>
-          <th>Status</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each statuses as s (s.id)}
+    <div class="table-scroll">
+      <table>
+        <thead>
           <tr>
-            <td>{s.name}</td>
-            <td><span class="kind-badge">{s.kind === "usb" ? "USB" : "Network"}</span></td>
-            <td>
-              <span class="status-badge status-{s.status}">{statusLabel(s.status)}</span>
-            </td>
+            <th>Camera</th>
+            <th>Type</th>
+            <th>Status</th>
           </tr>
-        {/each}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {#each statuses as s (s.id)}
+            <tr>
+              <td class="name-cell">{s.name}</td>
+              <td><span class="kind-badge">{s.kind === "usb" ? "USB" : "Network"}</span></td>
+              <td>
+                <span class="status-badge status-{s.status}">{statusLabel(s.status)}</span>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
   {/if}
 </div>
 
@@ -108,13 +110,29 @@
     opacity: 0.6;
     cursor: default;
   }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    background: var(--surface);
+  .table-scroll {
+    overflow-x: auto;
     border: 1px solid var(--border);
     border-radius: 10px;
-    overflow: hidden;
+  }
+  table {
+    width: 100%;
+    /* Only floors the width - and only past a certain viewport - on
+       screens wide enough to spare it; the point was to stop columns
+       getting *needlessly* cramped on a tablet-ish width, not to force a
+       hidden-scrollbar table on a phone. Below 480px the table lays out
+       at its natural 100% width instead, letting the name column wrap
+       (see .name-cell) rather than overflowing off-screen. */
+    border-collapse: collapse;
+    background: var(--surface);
+  }
+  @media (min-width: 480px) {
+    table {
+      min-width: 420px;
+    }
+  }
+  .name-cell {
+    overflow-wrap: break-word;
   }
   th,
   td {

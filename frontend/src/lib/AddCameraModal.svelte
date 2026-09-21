@@ -138,13 +138,14 @@
     align-items: center;
     justify-content: center;
     z-index: 50;
+    padding: 1rem;
   }
   .modal {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 12px;
     padding: 1.5rem;
-    width: 360px;
+    width: min(360px, 100%);
     display: flex;
     flex-direction: column;
     gap: 0.75rem;

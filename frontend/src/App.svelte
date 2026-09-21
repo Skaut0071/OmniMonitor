@@ -37,6 +37,7 @@
   let recordingsCamera: Camera | null = null;
   let expandedCamera: Camera | null = null;
   let showIgnoredUsbDevices = false;
+  let mobileNavOpen = false;
 
   async function refresh() {
     try {
@@ -153,32 +154,91 @@
 {:else if !username}
   <Login on:loggedIn={onLoggedIn} />
 {:else}
+  <div class="mobile-topbar">
+    <div class="brand">
+      <span class="brand-mark">●</span>
+      <span class="brand-name">OmniMonitor</span>
+    </div>
+    <button
+      class="hamburger"
+      aria-label="Menu"
+      aria-expanded={mobileNavOpen}
+      on:click={() => (mobileNavOpen = !mobileNavOpen)}
+    >
+      ☰
+    </button>
+  </div>
+
+  {#if mobileNavOpen}
+    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div class="drawer-backdrop" on:click={() => (mobileNavOpen = false)}></div>
+  {/if}
+
   <div class="layout">
-    <aside class="sidebar">
+    <aside class="sidebar" class:open={mobileNavOpen}>
       <div class="brand">
         <span class="brand-mark">●</span>
         <span class="brand-name">OmniMonitor</span>
       </div>
       <nav>
         <!-- svelte-ignore a11y-invalid-attribute -->
-        <a class:active={view === "dashboard"} href="#/" on:click|preventDefault={() => (view = "dashboard")}
-          >Dashboard</a
+        <a
+          class:active={view === "dashboard"}
+          href="#/"
+          on:click|preventDefault={() => {
+            view = "dashboard";
+            mobileNavOpen = false;
+          }}>Dashboard</a
         >
         <!-- svelte-ignore a11y-invalid-attribute -->
-        <a class:active={view === "status"} href="#/" on:click|preventDefault={() => (view = "status")}
-          >Status</a
+        <a
+          class:active={view === "status"}
+          href="#/"
+          on:click|preventDefault={() => {
+            view = "status";
+            mobileNavOpen = false;
+          }}>Status</a
         >
       </nav>
       <div class="sidebar-footer">
-        <button class="ghost" on:click={runDiscover}>Rescan USB cameras</button>
-        <button class="ghost" on:click={() => (showIgnoredUsbDevices = true)}
-          >Ignored USB devices</button
+        <button
+          class="ghost"
+          on:click={() => {
+            runDiscover();
+            mobileNavOpen = false;
+          }}>Rescan USB cameras</button
         >
-        <button class="primary" on:click={() => (showAddModal = true)}>+ Add camera</button>
+        <button
+          class="ghost"
+          on:click={() => {
+            showIgnoredUsbDevices = true;
+            mobileNavOpen = false;
+          }}>Ignored USB devices</button
+        >
+        <button
+          class="primary"
+          on:click={() => {
+            showAddModal = true;
+            mobileNavOpen = false;
+          }}>+ Add camera</button
+        >
         <div class="account">
           <span class="username">{username}</span>
-          <button class="link" on:click={() => (showChangePassword = true)}>Change password</button>
-          <button class="link" on:click={() => (showRtspCredentials = true)}>RTSP credentials</button>
+          <button
+            class="link"
+            on:click={() => {
+              showChangePassword = true;
+              mobileNavOpen = false;
+            }}>Change password</button
+          >
+          <button
+            class="link"
+            on:click={() => {
+              showRtspCredentials = true;
+              mobileNavOpen = false;
+            }}>RTSP credentials</button
+          >
           <button class="link" on:click={signOut}>Sign out</button>
         </div>
       </div>
@@ -301,6 +361,23 @@
 {/if}
 
 <style>
+  .mobile-topbar {
+    display: none;
+  }
+  .drawer-backdrop {
+    display: none;
+  }
+  .hamburger {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    font-size: 1.1rem;
+    line-height: 1;
+    padding: 0.4rem 0.6rem;
+    cursor: pointer;
+  }
+
   .layout {
     display: flex;
     height: 100%;
@@ -313,6 +390,57 @@
     display: flex;
     flex-direction: column;
     padding: 1rem;
+  }
+
+  /* Below this width the always-visible sidebar becomes a slide-out
+     drawer triggered by a hamburger button in a fixed top bar - a fixed
+     220px sidebar permanently eating a third or more of a phone's width
+     alongside content isn't usable, but the sidebar's own layout/markup
+     stays exactly the same, just repositioned and hidden by default. */
+  @media (max-width: 760px) {
+    .mobile-topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.6rem 1rem;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 40;
+    }
+    .mobile-topbar .brand {
+      padding: 0;
+    }
+    .layout {
+      display: block;
+      height: auto;
+      min-height: calc(100% - 3.2rem);
+    }
+    .sidebar {
+      position: fixed;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      width: min(280px, 84vw);
+      z-index: 50;
+      transform: translateX(-100%);
+      transition: transform 0.2s ease;
+      overflow-y: auto;
+    }
+    .sidebar.open {
+      transform: translateX(0);
+    }
+    .sidebar .brand {
+      display: none; /* already shown in .mobile-topbar */
+    }
+    .drawer-backdrop {
+      display: block;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 45;
+    }
   }
   .brand {
     display: flex;
@@ -385,6 +513,11 @@
     padding: 1.5rem 2rem;
     overflow-y: auto;
   }
+  @media (max-width: 760px) {
+    main {
+      padding: 1rem;
+    }
+  }
   header {
     display: flex;
     align-items: baseline;
@@ -439,7 +572,10 @@
   }
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    /* min(320px, 100%) rather than a bare 320px: on a viewport narrower
+       than 320px + gutters, a fixed minmax would force horizontal
+       scrolling instead of just going to a single, full-width column. */
+    grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
     gap: 1rem;
   }
   .grid-item {

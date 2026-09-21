@@ -275,6 +275,15 @@
     min-height: 0;
     overflow: hidden;
   }
+  @media (max-width: 640px) {
+    .body {
+      grid-template-columns: 1fr;
+      overflow: visible;
+    }
+    .list {
+      max-height: 30vh;
+    }
+  }
   .list {
     display: flex;
     flex-direction: column;
