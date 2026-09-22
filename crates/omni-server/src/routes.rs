@@ -21,6 +21,7 @@ use crate::discovery::auto_discover_usb_cameras;
 use crate::onvif_discovery::{self, DiscoveredDevice};
 use crate::reachability;
 use crate::state::AppState;
+use crate::supervisor::Supervisor;
 use crate::ws::stream_ws_handler;
 
 /// `/api/auth/login` is the only endpoint reachable without a session;
@@ -583,7 +584,7 @@ async fn update_camera(
         .apply_settings(&camera)
         .await
         .map_err(internal_error)?;
-    if camera.recording.enabled || camera.motion.enabled {
+    if Supervisor::keeps_pipeline_alive(&camera) {
         state
             .supervisor
             .ensure_running(&camera)

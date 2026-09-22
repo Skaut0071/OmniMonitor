@@ -925,20 +925,20 @@ nothing would naturally notice one had been crossed - `omni-
 server::schedule` is a new background task (30s poll, mirroring
 `retention::run`'s and `auth::run_session_sweeper`'s pattern) that
 re-evaluates every camera with a schedule enabled and calls
-`Supervisor::restart_if_running` (then `ensure_running` if the window just
+`Supervisor::apply_settings` (then `ensure_running` if the window just
 opened) exactly when its active/inactive state actually changes - tracked
 per-camera in a `HashMap` so a no-op poll (the common case) touches
-nothing. Deliberately *not* wired into `keeps_pipeline_alive` (which still
-only checks `motion.enabled || recording.enabled`): a schedule-gated
-camera keeps its pipeline - and thus its USB device handle - open across
-the whole day rather than opening/closing the device at every window
-boundary, given this project's already-documented "device busy" flakiness
-around repeated open/close. Verified against a real running server: set a
-~3-minute window a few minutes out, watched real `.webm` segments appear
-exactly at the configured start and stop growing at the configured end,
-and confirmed the `schedule::run` log lines
-(`recording schedule boundary crossed, rebuilding pipeline`) fired at the
-right wall-clock times.
+nothing. Originally deliberately *not* wired into `keeps_pipeline_alive`
+(a schedule-gated camera kept its pipeline - and USB device handle - open
+across the whole day rather than opening/closing at every window
+boundary, given this project's already-documented "device busy"
+flakiness around repeated open/close); **as of v0.14 it is** - see
+"Schedule-gated cameras actually power down outside their window
+(v0.14)" below for why that tradeoff was revisited. Verified against a
+real running server: set a ~3-minute window a few minutes out, watched
+real `.webm` segments appear exactly at the configured start and stop
+growing at the configured end, and confirmed the `schedule::run` log
+lines fired at the right wall-clock times.
 
 **Timeline tab.** A new `TimelineView.svelte`, reachable from a "Timeline"
 nav entry alongside "Dashboard"/"Status": a list of cameras whose
@@ -1210,6 +1210,70 @@ and that the resulting `.webm` files are valid/playable, not just
 present) was not performed here and is worth doing deliberately before
 leaning on this heavily - e.g. toggle a camera's recording on/off from
 the UI while its live view is open, and check nothing hiccups.
+
+## Schedule-gated cameras actually power down outside their window (v0.14)
+
+Follow-up to a question about whether a Tailscale connection could be
+degrading live view quality, which led to a broader ask: for a USB
+camera, turn it off (in whatever sense OmniMonitor actually controls)
+whenever nothing needs its view right now - not recording, or outside a
+configured recording schedule. Two things had to be untangled first,
+both resolved by asking rather than guessing:
+
+- **"Off" means "stop holding the device open,"** not literally cutting
+  USB power - this server doesn't control that, and most UVC webcams'
+  hardware activity light already turns off once nothing has the device
+  open/streaming anyway, so this gets the actual visible goal (the
+  camera's light not staying on for no reason) without needing anything
+  hardware-specific.
+- **`RecordingTrigger::Motion` can't be turned off *between* individual
+  motion events** without breaking motion detection itself - there's no
+  way to notice the next motion event on a camera that isn't open. So
+  within an active recording window (scheduled or not), a motion-trigger
+  camera stays on continuously, unaffected by this change - exactly
+  v0.12's fix. It's only *outside* a scheduled window that it closes,
+  same as any other trigger - the schedule is an explicit "don't watch
+  this camera during these hours" statement, so not detecting motion
+  during off-hours is the correct behavior, not a regression.
+
+The actual change is small precisely because v0.13's `apply_settings`
+already did the hard part: `Supervisor::keeps_pipeline_alive` changed
+from `motion.enabled || recording.enabled` to `motion.enabled ||
+(recording.enabled && (!schedule.enabled || schedule_is_active_now(...)))`.
+`schedule.rs`'s boundary-crossing poll already called `apply_settings` on
+every transition (v0.13) - and `apply_settings` already recomputes
+`keeps_pipeline_alive` after applying a recording change and tears the
+pipeline down itself (`remove_if_current`, LED `off_command` included)
+when it goes `false` with no viewer currently watching. Making
+`keeps_pipeline_alive` schedule-aware was enough on its own to get real
+device closure at the boundary - no new teardown path needed. Going the
+other direction (window opens), `schedule.rs`'s existing "call
+`ensure_running` if now active" line starts a fresh pipeline the normal
+way. Boot startup (`main.rs`) and `routes::update_camera`'s post-save
+`ensure_running` check both used to gate on a plain `recording.enabled
+|| motion.enabled` - updated to call `Supervisor::keeps_pipeline_alive`
+instead, so a schedule-gated camera outside its window doesn't get an
+unwanted pipeline started at boot or immediately after a settings save
+(which would otherwise partially undo `apply_settings`' just-decided
+teardown in the update-camera case).
+
+This is a real, acknowledged tradeoff, not an oversight: opening/closing
+a USB device right at a schedule boundary carries the same "device busy"
+risk already documented above (confirmed against this project's actual
+USB hardware while building v0.12/v0.13 - rapid open/close cycles on the
+same `/dev/videoN` aren't perfectly reliable even with
+`replace_pipeline`'s 200ms settle sleep). Asked directly, given that
+tradeoff, whether the camera should still close outside its scheduled
+window despite the risk - the answer was yes, so this is what shipped.
+
+Verified: `cargo build`/`clippy`/`test` clean across the workspace, plus
+three new unit tests for `Supervisor::keeps_pipeline_alive`'s
+deterministic cases. **Not** verified against real hardware crossing an
+actual schedule boundary in this session (would need waiting for a real
+wall-clock boundary, or a way to mock the clock, neither done here) -
+worth confirming deliberately: set a short recording schedule a few
+minutes out, and check the device is actually released (e.g. `lsof
+/dev/videoN` or checking journal logs) once the window closes.
 
 ## Known limitations / honest gaps in v0.10/v0.11
 

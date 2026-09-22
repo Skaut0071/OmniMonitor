@@ -9,13 +9,22 @@
 //! is different: nothing "happens" at 22:00, time just passes, so
 //! something has to actually poll for it.
 //!
-//! Deliberately doesn't touch `Supervisor::keeps_pipeline_alive` (a
-//! schedule-gated camera's pipeline still runs continuously whenever
-//! `recording.enabled` is true, scheduled window or not) - opening and
-//! closing a USB device exactly at every schedule boundary would add a
-//! real "device busy" risk (see `docs/ARCHITECTURE.md`) for no benefit;
-//! outside the window the pipeline just runs without its recording
-//! branch, same dynamic add/remove mechanism used for a settings change.
+//! As of v0.14, `Supervisor::keeps_pipeline_alive` *is* schedule-aware:
+//! a schedule-gated recording camera's pipeline actually stops (device
+//! closed) once the window ends, not just its recording branch, and
+//! restarts (via `ensure_running` below) when the window opens again -
+//! so the camera isn't sitting open/powered for no reason outside its
+//! scheduled hours. `apply_settings` recomputes `keeps_pipeline_alive`
+//! and tears the pipeline down itself when it goes false and no viewer
+//! is currently watching (see its docs) - this module just needs to call
+//! it on each boundary crossing and start a fresh pipeline if the window
+//! just opened and nothing was running. This deliberately accepts a real
+//! "device busy" risk at each boundary (confirmed against this project's
+//! actual USB hardware: rapid open/close cycles on the same `/dev/videoN`
+//! aren't perfectly reliable even with `replace_pipeline`'s existing
+//! 200ms settle sleep) as the tradeoff for the camera not staying
+//! open/powered outside its scheduled hours - a deliberate choice, not
+//! an oversight.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -50,11 +50,12 @@ async fn main() -> anyhow::Result<()> {
 
     let supervisor = Arc::new(Supervisor::new(PathBuf::from(&config.data_dir), db.clone()));
 
-    // Cameras with recording and/or standalone motion detection enabled
-    // get a persistent pipeline running from boot, independent of
-    // whether anyone is watching live.
+    // Cameras that need to keep running with no viewers (standalone
+    // motion detection, or recording that isn't currently gated off by
+    // its own schedule - see Supervisor::keeps_pipeline_alive) get a
+    // persistent pipeline started from boot.
     for camera in db.list_cameras().await.unwrap_or_default() {
-        if camera.recording.enabled || camera.motion.enabled {
+        if Supervisor::keeps_pipeline_alive(&camera) {
             if let Err(err) = supervisor.ensure_running(&camera).await {
                 tracing::error!(camera = %camera.id, %err, "failed to start pipeline at boot");
             } else {

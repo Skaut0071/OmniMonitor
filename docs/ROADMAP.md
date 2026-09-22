@@ -427,6 +427,50 @@ The three items deferred from v0.9 as "bigger, own milestone":
       synchronously from a probe callback) - on every detach, so there's
       no reused element to get into a stuck state.
 
+## v0.14 - schedule-gated cameras actually power down outside their window - done
+
+- [x] **A schedule-gated recording camera's pipeline now closes the
+      device outside its scheduled window**, not just its recording
+      branch - `Supervisor::keeps_pipeline_alive` is schedule-aware:
+      `recording.enabled` alone only counts as a reason to keep the
+      pipeline running when there's no schedule restricting it, or the
+      schedule's window is active right now. Standalone motion detection
+      (`motion.enabled`, independent of recording) is unaffected - it
+      always keeps the pipeline alive, since there's no way to notice the
+      next motion event on a camera that isn't open. Applies to
+      `RecordingTrigger::Motion` too: within an active scheduled window
+      the camera stays on continuously (so it can keep watching for the
+      next motion event, unaffected by v0.12's fix), but outside the
+      window it closes entirely, same as a continuous-trigger camera -
+      motion isn't watched for outside hours the schedule was explicitly
+      set to restrict.
+- [x] `schedule.rs`'s boundary-crossing check already called
+      `apply_settings` (v0.13) and `ensure_running` on activation - since
+      `apply_settings` recomputes `keeps_pipeline_alive` and tears the
+      pipeline down itself once it goes false with no active viewer
+      (already-existing logic from v0.13's recording-toggle work), making
+      `keeps_pipeline_alive` schedule-aware was enough to get the actual
+      close-on-boundary behavior with no new teardown path needed. Boot
+      startup (`main.rs`) and `routes::update_camera`'s post-save
+      `ensure_running` check were updated to the same
+      `Supervisor::keeps_pipeline_alive` logic, so a camera outside its
+      window doesn't get an unwanted pipeline started at boot or
+      immediately after a settings save either.
+- [x] **A deliberate tradeoff, not an oversight**: opening/closing a USB
+      device right at a schedule boundary carries a real "device busy"
+      risk - confirmed against this project's actual USB hardware during
+      v0.12/v0.13 testing, rapid open/close cycles on the same
+      `/dev/videoN` aren't perfectly reliable even with
+      `replace_pipeline`'s existing 200ms settle sleep. Chosen anyway,
+      on request, in favor of the camera not sitting open/powered outside
+      its scheduled hours.
+- [x] Full workspace `cargo build`/`clippy`/`test` clean, including three
+      new unit tests for `Supervisor::keeps_pipeline_alive`'s
+      deterministic cases (nothing enabled, standalone motion, recording
+      with no schedule restriction) - the schedule-boundary case itself
+      needs a real/mocked clock to test deterministically and wasn't
+      covered by a new automated test this round.
+
 ## Later / unscheduled
 
 - [ ] Apply the *remaining* camera settings changes (resolution,

@@ -8,9 +8,13 @@
 //! subscribes to its broadcast channel instead of starting their own.
 //!
 //! Lifecycle:
-//! - A camera with recording (continuous) or standalone motion detection
-//!   enabled gets a persistent pipeline, started at server boot and kept
-//!   running regardless of viewers.
+//! - A camera with standalone motion detection enabled, or with
+//!   recording enabled and either no schedule restricting it or its
+//!   scheduled window currently active, gets a persistent pipeline,
+//!   started at server boot and kept running regardless of viewers -
+//!   see `keeps_pipeline_alive`. A schedule-gated recording camera's
+//!   pipeline actually stops outside its window (v0.14) rather than
+//!   sitting open unused - see `schedule.rs`.
 //! - A camera being watched but not recorded/detected gets an ephemeral
 //!   pipeline: started on the first viewer, stopped when the last one
 //!   disconnects.
@@ -120,9 +124,10 @@ struct ManagedCamera {
     superseded: watch::Sender<bool>,
     viewers: AtomicUsize,
     /// Whether this specific pipeline instance should keep running with
-    /// no viewers (continuous recording or standalone motion detection).
-    /// For `RecordingTrigger::Motion`, this is true whenever recording is
-    /// enabled at all - motion detection itself must keep running
+    /// no viewers right now - see `Supervisor::keeps_pipeline_alive`. For
+    /// `RecordingTrigger::Motion`, this is true whenever recording is
+    /// enabled and not currently gated off by its own schedule: motion
+    /// detection itself must keep running throughout that window
     /// regardless of viewers so it can notice the *next* transition,
     /// even while currently not actively recording.
     keep_alive: AtomicBool,
@@ -311,8 +316,24 @@ impl Supervisor {
         }
     }
 
-    fn keeps_pipeline_alive(camera: &Camera) -> bool {
-        camera.motion.enabled || camera.recording.enabled
+    /// Whether this camera needs its pipeline running (device open)
+    /// regardless of viewers, right now.
+    ///
+    /// `motion.enabled` (standalone motion detection, independent of
+    /// recording) always keeps it alive - there's no schedule on that,
+    /// and no way to notice the next motion event on a camera that isn't
+    /// open. `recording.enabled` alone only keeps it alive when there's
+    /// no schedule restricting it, or the schedule's window is active
+    /// right now - as of v0.14, a schedule-gated recording camera (any
+    /// trigger, including `Motion`) actually closes its device outside
+    /// the scheduled window rather than sitting open unused, at the cost
+    /// of open/close cycles at each boundary (see `schedule.rs`'s docs
+    /// for the device-busy risk that's the deliberate tradeoff here).
+    pub(crate) fn keeps_pipeline_alive(camera: &Camera) -> bool {
+        camera.motion.enabled
+            || (camera.recording.enabled
+                && (!camera.recording.schedule.enabled
+                    || schedule_is_active_now(&camera.recording.schedule)))
     }
 
     fn spawn_managed(
@@ -563,4 +584,37 @@ fn merge_end_signals(
         }
     });
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn usb_camera() -> Camera {
+        Camera::new_usb("test", "/dev/video0")
+    }
+
+    #[test]
+    fn nothing_enabled_does_not_keep_the_pipeline_alive() {
+        assert!(!Supervisor::keeps_pipeline_alive(&usb_camera()));
+    }
+
+    #[test]
+    fn standalone_motion_detection_always_keeps_it_alive() {
+        let mut camera = usb_camera();
+        camera.motion.enabled = true;
+        assert!(Supervisor::keeps_pipeline_alive(&camera));
+    }
+
+    /// Regression guard for exactly the v0.14 change: recording with no
+    /// schedule restriction (the common case) must keep behaving like
+    /// before - always alive while enabled, not accidentally gated by a
+    /// schedule that was never turned on.
+    #[test]
+    fn recording_with_no_schedule_restriction_always_keeps_it_alive() {
+        let mut camera = usb_camera();
+        camera.recording.enabled = true;
+        assert!(!camera.recording.schedule.enabled);
+        assert!(Supervisor::keeps_pipeline_alive(&camera));
+    }
 }
