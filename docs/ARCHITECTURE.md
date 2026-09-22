@@ -1126,6 +1126,91 @@ motion detection enabled is capturing for its own reasons regardless of
 viewers, so LED control deliberately doesn't apply there - there's no
 "someone started/stopped watching" transition to hook for it.
 
+## Dynamic recording toggle without a pipeline restart (v0.13)
+
+Every settings change - including a plain recording on/off toggle, or a
+recording schedule crossing its start/end boundary - used to restart the
+whole pipeline (`Supervisor::replace_pipeline`), which disconnects every
+active live viewer of that camera even though, for a recording toggle,
+nothing about the actual decoded/encoded video changed at all. v0.13
+splits settings changes into two paths, dispatched by a new
+`Supervisor::apply_settings` (replacing the direct `restart_if_running`
+calls from `routes::update_camera` and `schedule::run`):
+
+- **Structural changes** (resolution, framerate, rotation, the
+  timestamp overlay, an RTSP URL edit, or motion detection's presence
+  turning on/off - anything that changes what's actually being
+  decoded/encoded) still go through a full `replace_pipeline` restart,
+  same as before, disconnecting active viewers.
+- **Recording turning on/off** - an explicit toggle, a segment-length
+  edit, or a schedule boundary crossing - doesn't touch any of that, so
+  it's applied by dynamically adding or removing the recording branch on
+  the *live*, already-PLAYING pipeline instead, via GStreamer `tee`
+  request-pad add/remove. The live-view branch is never touched, so
+  active viewers stay connected through it.
+
+`apply_settings` decides which path to take by comparing a
+`StructuralConfig` snapshot (kind/URL, width, height, framerate,
+rotation, overlay, and whether motion detection needs to run at all -
+everything in the first list above) against the value captured on
+`ManagedCamera` when the currently-running pipeline was actually built.
+Any difference falls back to a full restart; an exact match takes the
+dynamic path.
+
+### Why this isn't the same failure mode as the abandoned `valve` attempt
+
+"Motion detection" above already covers why gating an *always-present*
+recording branch with a GStreamer `valve` toggled live didn't work out:
+reusing one `splitmuxsink` instance across open/close cycles reliably
+left it stuck on reopen. `CaptureSession::set_recording` (`omni-capture`)
+is a different mechanism, not a variant of that one:
+
+- **Attaching** creates a brand new `queue`+`splitmuxsink` pair every
+  time (`attach_recording`), brings them all the way up to the
+  pipeline's current state *before* linking them to `omni_tee`'s newly
+  requested pad (so the first buffer the tee forwards lands on an
+  element that's actually ready to receive it, not one still in
+  NULL/READY), then links. This is also what `CaptureSession::start`
+  itself calls when a pipeline's built with recording already on - one
+  codepath for "recording starts now" whether that's at initial
+  construction or a later toggle, instead of the static parse-launch
+  string embedding its own separate copy of this logic (which is what
+  earlier versions did).
+- **Detaching** (`detach_recording`) never reuses or reopens anything -
+  it finalizes the file properly, then throws the elements away:
+  1. A blocking pad probe (`PAD_PROBE_TYPE_BLOCK_DOWNSTREAM`) on the
+     tee's request pad for this branch guarantees no more real video
+     buffers are in flight into it once the probe callback runs.
+  2. From inside that callback, an EOS event is injected directly into
+     the branch (on the recording `queue`'s sink pad) - not sent through
+     the tee, since the tee pad is about to be removed anyway - so
+     `splitmuxsink` finalizes its current segment file (writes a proper
+     WebM trailer) instead of leaving it truncated.
+  3. A second probe (on the same queue sink pad, watching for the EOS
+     *event*, not a buffer) signals a `tokio::sync::oneshot` once that
+     EOS has actually reached the branch, which `set_recording` awaits
+     with a 5s timeout - long enough in the ordinary case, bounded so a
+     wedged branch can't hang a settings change forever.
+  4. The actual element teardown (`set_state(Null)` on `queue`/
+     `splitmuxsink`, `pipeline.remove_many`, releasing the tee's request
+     pad) happens via `Element::call_async`, not synchronously inside
+     the probe callback - restructuring a pipeline from the streaming
+     thread that's handling a probe/event risks deadlocking it, which is
+     exactly the kind of thing this project's own `valve` postmortem
+     warns isn't obvious from GStreamer's docs alone.
+
+Verified: `cargo build`/`clippy`/`test` are clean across the workspace
+after this change (existing pipeline-fragment and motion-retention unit
+tests unaffected). **Not** verified against real hardware in this
+session specifically: the two USB cameras available on this dev machine
+were both held open by the already-running production instance at the
+time this was built, so a live toggle-while-watching test (confirming a
+viewer genuinely stays connected through several attach/detach cycles,
+and that the resulting `.webm` files are valid/playable, not just
+present) was not performed here and is worth doing deliberately before
+leaning on this heavily - e.g. toggle a camera's recording on/off from
+the UI while its live view is open, and check nothing hiccups.
+
 ## Known limitations / honest gaps in v0.10/v0.11
 
 - **Single admin account and single RTSP credential, not
@@ -1135,12 +1220,14 @@ viewers, so LED control deliberately doesn't apply there - there's no
   fine-grained, and Basic auth over RTSP isn't encrypted (see "HTTPS"
   above) - don't expose port 5544 to the open internet as-is.
 - **A settings change disconnects active viewers of that camera** (see
-  "One shared pipeline per camera" above) rather than applying live. As
-  of v0.12 this no longer happens on every motion start/stop for
-  `RecordingTrigger::Motion` cameras (see "Motion recording pre/post-roll,
-  without rebuilding the pipeline (v0.12)" below) - only an actual
-  settings change (resolution, rotation, toggling recording/motion
-  itself, ...) still restarts the pipeline.
+  "One shared pipeline per camera" above) rather than applying live -
+  except for recording turning on/off, which is applied dynamically as
+  of v0.13 (see "Dynamic recording toggle without a pipeline restart
+  (v0.13)" below) without disconnecting anyone. Resolution, framerate,
+  rotation, the timestamp overlay, an RTSP URL edit, or motion detection
+  turning on/off still restart the pipeline and disconnect viewers -
+  those change what's actually being decoded/encoded, not just whether
+  a branch is attached to an otherwise-unchanged pipeline.
 - **Frame-drop-under-backpressure can transiently corrupt VP8 decode for
   live viewers.** The broadcast channel a lagging viewer falls behind on
   just skips ahead (`RecvError::Lagged`), which can show as a brief glitch

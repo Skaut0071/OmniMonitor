@@ -394,18 +394,75 @@ The three items deferred from v0.9 as "bigger, own milestone":
       `Supervisor`'s existing ephemeral-pipeline lifecycle rather than
       adding a separate one.
 
+## v0.13 - dynamic recording toggle, no viewer disconnect - done
+
+- [x] **Recording on/off no longer restarts the pipeline**: toggling
+      `recording.enabled` (or a segment-length edit, or the recording
+      schedule crossing a start/end boundary) used to do a full
+      `replace_pipeline` restart - same as any other settings change -
+      which disconnected every active live viewer of that camera even
+      though nothing about the actual video (resolution, rotation, ...)
+      changed. `omni-server::supervisor::apply_settings` now compares a
+      `StructuralConfig` snapshot (resolution, framerate, rotation,
+      overlay, RTSP URL, and whether motion detection needs to run at
+      all) against what the running pipeline was actually built with; if
+      that's unchanged, only the recording branch is added or removed on
+      the *live* pipeline via GStreamer `tee` request-pad add/remove
+      (`CaptureSession::set_recording` in `omni-capture`) instead of a
+      restart - the live-view branch is never touched, so active viewers
+      stay connected through a recording toggle or a schedule boundary.
+      Resolution, rotation, the overlay, an RTSP URL edit, or motion
+      detection's presence turning on/off still fall back to a full
+      restart (see "Later / unscheduled" below) - those change what's
+      actually being decoded/encoded, which a branch add/remove can't
+      express.
+- [x] **Not the same mechanism as the abandoned `valve` attempt**: that
+      approach reused one `splitmuxsink` instance across open/close
+      cycles and got it stuck on reopen (see "Motion detection" in
+      `docs/ARCHITECTURE.md`). `set_recording` instead creates a fresh
+      `queue`+`splitmuxsink` pair on every attach and fully removes them
+      - after finalizing the current segment with a real EOS, via a
+      blocking pad probe plus `Element::call_async` for the actual
+      element removal (structural pipeline changes can't happen
+      synchronously from a probe callback) - on every detach, so there's
+      no reused element to get into a stuck state.
+
 ## Later / unscheduled
 
-- [ ] Apply camera settings changes (resolution, rotation, the recording
-      enabled/schedule toggle, ...) without disconnecting active viewers
-      - needs dynamic GStreamer `tee` pad add/remove instead of a full
-      pipeline restart. `RecordingTrigger::Motion`'s specific case of this
-      (a rebuild on every motion transition) is fixed as of v0.12 - see
-      above - but any other settings change still restarts the pipeline
-      and disconnects viewers.
+- [ ] Apply the *remaining* camera settings changes (resolution,
+      framerate, rotation, the timestamp overlay, an RTSP URL edit, or
+      motion detection turning on/off) without disconnecting active
+      viewers. Recording on/off is fixed as of v0.13 - see above - but
+      these all change what's actually being decoded/encoded, not just
+      whether an already-unchanged pipeline has a branch attached, so
+      they'd need genuine mid-stream reconfiguration (live caps
+      renegotiation on `videoscale`/`videoflip`/`vp8enc`, or a second
+      dynamic-branch mechanism for the motion-detection appsink) rather
+      than the `tee` request-pad trick recording uses - meaningfully
+      trickier and not yet attempted.
 - [ ] Multi-user / per-camera permissions - still single-account only,
       and the RTSP credential (above) is a single shared secret too, not
       per-camera.
+- [ ] Per-viewer adaptive bitrate for WebRTC live view (raised after a
+      report of live view going black over a Tailscale connection -
+      suspected cause: a fixed ~2Mbps VP8 target-bitrate with no
+      congestion response, plus no TURN fallback if direct UDP doesn't
+      establish - see the STUN/TURN revert noted above). Explicitly
+      wanted **per-viewer**, not a single pipeline-wide bitrate: today
+      recording, RTSP, and every live viewer all share one `vp8enc`
+      encode off one tee, so reacting to one struggling viewer (e.g. a
+      phone on Tailscale) would also degrade quality for every other
+      viewer and the recording at that moment. Per-viewer quality needs
+      simulcast (multiple simultaneous encodes at different
+      bitrates/resolutions, viewer subscribes to whichever layer its
+      connection can sustain) rather than adjusting the one shared
+      encoder - meaningfully more CPU and pipeline complexity than a
+      shared-bitrate version would be. The RTCP receiver reports needed
+      to detect a struggling viewer (packet loss/jitter) are already
+      being read per peer connection in `omni-webrtc` and currently just
+      discarded (`crates/omni-webrtc/src/lib.rs`, "RTCP must be read even
+      if we don't act on it") - that's the hook point once this is
+      picked up.
 - [ ] Hardware-accelerated encode (VA-API/NVENC) as an alternative to the
       software `vp8enc` path, for higher camera counts on modest hardware.
 - [ ] H.264 passthrough for RTSP cameras that already send it, instead of

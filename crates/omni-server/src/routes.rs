@@ -441,8 +441,8 @@ struct UpdateMotionRequest {
 
 /// All fields optional (PATCH semantics): only provided fields are
 /// changed. If anything is running for this camera when it's updated,
-/// its pipeline is restarted immediately so the change takes effect -
-/// see `Supervisor::restart_if_running`.
+/// the change is applied immediately - without disconnecting active
+/// viewers when possible - see `Supervisor::apply_settings`.
 #[derive(Deserialize)]
 struct UpdateCameraRequest {
     name: Option<String>,
@@ -580,7 +580,7 @@ async fn update_camera(
 
     state
         .supervisor
-        .restart_if_running(&camera)
+        .apply_settings(&camera)
         .await
         .map_err(internal_error)?;
     if camera.recording.enabled || camera.motion.enabled {

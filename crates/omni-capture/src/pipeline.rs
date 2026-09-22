@@ -67,27 +67,30 @@ impl CaptureSource {
     }
 }
 
-/// If set, the pipeline gains a second branch that writes fixed-length
-/// `.webm` segment files to `dir` indefinitely (GStreamer `splitmuxsink`).
-/// Retention (deleting old segments) is handled separately by
-/// `omni-server::retention`, not by this crate.
+/// If set (initially, via `PipelineConfig`, or later via
+/// `CaptureSession::set_recording`), the pipeline gains a second branch
+/// that writes fixed-length `.webm` segment files to `dir` indefinitely
+/// (GStreamer `splitmuxsink`). Retention (deleting old segments) is
+/// handled separately by `omni-server::retention`/`motion_retention`,
+/// not by this crate.
 ///
-/// For "only record while motion is detected"
-/// (`omni_core::RecordingTrigger::Motion`), this branch is simply absent
-/// or present depending on the *current* motion state at the moment a
-/// pipeline is (re)built - `omni-server::supervisor` rebuilds the whole
-/// pipeline on each motion start/stop, it doesn't gate a always-present
-/// branch live. That was tried first (a GStreamer `valve` toggled from
-/// the motion-detection callback) and abandoned after testing it
-/// end-to-end: a `valve` that starts closed blocks the whole pipeline's
-/// transition to PLAYING (nothing downstream of `decodebin` preroll's,
-/// not just the recording branch - confirmed with a plain buffer-count
-/// probe, not just "no errors"), and starting it open and closing it
-/// shortly after avoids that but reliably left `splitmuxsink` stuck
-/// on re-open (very likely a keyframe/timestamp discontinuity the muxer
-/// doesn't recover from). Rebuilding the pipeline is slower per
-/// transition but uses the same restart path already proven for settings
-/// changes.
+/// Turning this on/off after the pipeline is already running (a
+/// recording toggle, or a schedule boundary - see
+/// `omni-server::supervisor::apply_settings`) dynamically adds or
+/// removes the branch from the live pipeline via GStreamer's `tee`
+/// request-pad mechanism, instead of rebuilding the whole pipeline -
+/// which is what makes it possible without disconnecting active live
+/// viewers. This is a different mechanism from - and doesn't share the
+/// failure mode of - an earlier attempt that gated an always-present
+/// branch with a GStreamer `valve` toggled from the motion-detection
+/// callback (see `docs/ARCHITECTURE.md`'s "Motion detection" section):
+/// that approach reused *one* `splitmuxsink` instance across open/close
+/// cycles and reliably got it stuck on reopen. `set_recording` instead
+/// creates a brand new `queue`+`splitmuxsink` pair every time recording
+/// starts and fully removes them (after finalizing the current segment
+/// file with a real EOS) every time it stops - there's no element
+/// being reused across a stop/start cycle for a stale keyframe/timestamp
+/// discontinuity to get stuck in.
 #[derive(Debug, Clone)]
 pub struct RecordingSink {
     pub dir: PathBuf,
@@ -151,6 +154,26 @@ fn motion_diff_fraction(prev: &[u8], cur: &[u8]) -> f32 {
 pub struct CaptureSession {
     pipeline: gst::Pipeline,
     frames_tx: broadcast::Sender<EncodedFrame>,
+    /// The currently-attached recording branch, if any - see
+    /// `set_recording`. `None` here does not necessarily mean recording
+    /// was never configured; it also becomes `None` once a branch has
+    /// been fully detached.
+    recording: Mutex<Option<RecordingBranch>>,
+}
+
+/// The dynamically-added `tee` src pad + `queue`/`splitmuxsink` pair
+/// backing an active recording branch - see `attach_recording`/
+/// `detach_recording`. `dir`/`segment_seconds` are kept alongside so
+/// `set_recording` can tell "recording is on and unchanged" (no-op) apart
+/// from "recording is on but the target directory or segment length
+/// changed" (detach the old branch, attach a fresh one) without having to
+/// inspect the GStreamer elements themselves.
+struct RecordingBranch {
+    tee_pad: gst::Pad,
+    queue: gst::Element,
+    splitmuxsink: gst::Element,
+    dir: PathBuf,
+    segment_seconds: u32,
 }
 
 pub struct CaptureHandle {
@@ -209,6 +232,84 @@ fn videoflip_method(rotation: omni_core::Rotation) -> &'static str {
         omni_core::Rotation::Rotate180 => "rotate-180",
         omni_core::Rotation::CounterClockwise90 => "counterclockwise",
     }
+}
+
+/// Dynamically adds a fresh `queue ! splitmuxsink` recording branch onto
+/// `pipeline`'s `omni_tee`, bringing the new elements all the way up to
+/// the pipeline's current state *before* linking them to the tee - so
+/// the very first buffer the tee forwards to the new branch lands on an
+/// element that's actually ready to receive it, not one still in
+/// NULL/READY (which pushing into can fail). Used both for a pipeline's
+/// initial recording branch (`CaptureSession::start`) and for a later
+/// `set_recording` toggle - one codepath either way.
+fn attach_recording(
+    pipeline: &gst::Pipeline,
+    sink: &RecordingSink,
+) -> Result<RecordingBranch, CaptureError> {
+    let omni_tee = pipeline
+        .by_name("omni_tee")
+        .ok_or_else(|| CaptureError::Build("tee 'omni_tee' not found".into()))?;
+
+    std::fs::create_dir_all(&sink.dir)?;
+    // The run-start prefix is what keeps this safe across repeated
+    // attach/detach cycles on the same pipeline (as well as across a
+    // full pipeline restart): splitmuxsink always counts segments from 0
+    // for a given instance, and each attach creates a brand new
+    // instance. Without a unique-per-attach prefix, a second recording
+    // session's `seg00000.webm` would silently overwrite the first's
+    // already-recorded footage.
+    let run_started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let location = sink.dir.join(format!("{run_started_at}-%05d.webm"));
+    let max_size_time_ns = (sink.segment_seconds as u64) * 1_000_000_000;
+
+    let queue = gst::ElementFactory::make("queue")
+        .property("max-size-buffers", 0u32)
+        .property("max-size-bytes", 0u32)
+        .property("max-size-time", 0u64)
+        .build()
+        .map_err(|e| CaptureError::Build(format!("failed to create recording queue: {e}")))?;
+    let splitmuxsink = gst::ElementFactory::make("splitmuxsink")
+        .property("location", location.to_string_lossy().as_ref())
+        .property("max-size-time", max_size_time_ns)
+        .property_from_str("muxer-factory", "matroskamux")
+        .property("async-finalize", true)
+        .build()
+        .map_err(|e| CaptureError::Build(format!("failed to create splitmuxsink: {e}")))?;
+
+    pipeline
+        .add_many([&queue, &splitmuxsink])
+        .map_err(|e| CaptureError::Build(format!("failed to add recording elements: {e}")))?;
+    queue
+        .link(&splitmuxsink)
+        .map_err(|e| CaptureError::Build(format!("failed to link recording queue to splitmuxsink: {e}")))?;
+
+    splitmuxsink
+        .sync_state_with_parent()
+        .map_err(|e| CaptureError::Build(format!("failed to start splitmuxsink: {e}")))?;
+    queue
+        .sync_state_with_parent()
+        .map_err(|e| CaptureError::Build(format!("failed to start recording queue: {e}")))?;
+
+    let tee_pad = omni_tee
+        .request_pad_simple("src_%u")
+        .ok_or_else(|| CaptureError::Build("failed to request a new tee pad for recording".into()))?;
+    let queue_sink = queue
+        .static_pad("sink")
+        .ok_or_else(|| CaptureError::Build("recording queue has no sink pad".into()))?;
+    tee_pad
+        .link(&queue_sink)
+        .map_err(|e| CaptureError::Build(format!("failed to link tee to recording branch: {e:?}")))?;
+
+    Ok(RecordingBranch {
+        tee_pad,
+        queue,
+        splitmuxsink,
+        dir: sink.dir.clone(),
+        segment_seconds: sink.segment_seconds,
+    })
 }
 
 impl CaptureSession {
@@ -280,29 +381,13 @@ impl CaptureSession {
             ));
         }
 
-        if let Some(recording) = &config.recording {
-            std::fs::create_dir_all(&recording.dir)?;
-            // The run-start prefix is what keeps this safe across
-            // restarts: splitmuxsink always counts segments from 0 within
-            // one pipeline instance, and a settings change (or any other
-            // reason to restart - see Supervisor::restart_if_running)
-            // starts a fresh instance. Without a unique-per-run prefix,
-            // that second instance's `seg00000.webm` would silently
-            // overwrite the first instance's already-recorded footage.
-            let run_started_at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let location = recording.dir.join(format!("{run_started_at}-%05d.webm"));
-            let max_size_time_ns = (recording.segment_seconds as u64) * 1_000_000_000;
-            description.push_str(&format!(
-                " omni_tee. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 \
-                  ! splitmuxsink location=\"{location}\" max-size-time={max_size_time_ns} \
-                    muxer-factory=matroskamux async-finalize=true",
-                location = location.display(),
-            ));
-        }
-
+        // The recording branch (if any) is deliberately *not* part of the
+        // static parse-launch description - it's attached dynamically
+        // below, right after the pipeline reaches PLAYING, via the exact
+        // same `attach_recording` codepath `set_recording` uses for a
+        // later toggle. One codepath for "recording starts now" whether
+        // that's at initial pipeline construction or a later settings
+        // change, rather than two that could drift apart.
         tracing::debug!(%description, "generated pipeline description");
         let element =
             gst::parse::launch(&description).map_err(|e| CaptureError::Build(e.to_string()))?;
@@ -412,6 +497,11 @@ impl CaptureSession {
 
         pipeline.set_state(gst::State::Playing)?;
 
+        let recording = match &config.recording {
+            Some(sink) => Some(attach_recording(&pipeline, sink)?),
+            None => None,
+        };
+
         let (error_tx, error_rx) = watch::channel(None);
         spawn_bus_watch(pipeline.clone(), error_tx);
 
@@ -419,10 +509,130 @@ impl CaptureSession {
             session: CaptureSession {
                 pipeline,
                 frames_tx,
+                recording: Mutex::new(recording),
             },
             error: error_rx,
             motion: motion_rx,
         })
+    }
+
+    /// Dynamically adds or removes the recording branch on the live,
+    /// already-PLAYING pipeline - via GStreamer `tee` request-pad
+    /// add/remove, not a pipeline restart - so active live viewers (and
+    /// any other running branch: motion detection, other recordings)
+    /// are completely undisturbed. See `RecordingSink`'s docs for why
+    /// this is safe in a way an earlier `valve`-based attempt wasn't.
+    ///
+    /// A no-op if `desired` already matches what's currently attached
+    /// (same `Some`-ness, and same `dir`/`segment_seconds` if `Some`) -
+    /// callers are free to call this on every settings change without
+    /// checking first, e.g. `omni-server::supervisor::apply_settings`.
+    pub async fn set_recording(&self, desired: Option<RecordingSink>) -> Result<(), CaptureError> {
+        let (need_detach, need_attach) = {
+            let current = self.recording.lock().unwrap();
+            match (&*current, &desired) {
+                (None, None) => (false, false),
+                (Some(cur), Some(want))
+                    if cur.dir == want.dir && cur.segment_seconds == want.segment_seconds =>
+                {
+                    (false, false)
+                }
+                (existing, wanted) => (existing.is_some(), wanted.is_some()),
+            }
+        };
+        if !need_detach && !need_attach {
+            return Ok(());
+        }
+        if need_detach {
+            self.detach_recording().await?;
+        }
+        if need_attach {
+            // `desired` is `Some` whenever `need_attach` is true, by the
+            // match above.
+            let sink = desired.expect("need_attach implies desired is Some");
+            let branch = attach_recording(&self.pipeline, &sink)?;
+            *self.recording.lock().unwrap() = Some(branch);
+        }
+        Ok(())
+    }
+
+    /// Removes the currently-attached recording branch, if any -
+    /// finalizing its current segment file with a real EOS first (rather
+    /// than just yanking the elements out, which would leave a truncated,
+    /// possibly-unplayable `.webm`), then tearing the branch's elements
+    /// down and off the pipeline.
+    async fn detach_recording(&self) -> Result<(), CaptureError> {
+        let Some(branch) = self.recording.lock().unwrap().take() else {
+            return Ok(());
+        };
+
+        let queue_sink = branch
+            .queue
+            .static_pad("sink")
+            .ok_or_else(|| CaptureError::Build("recording queue has no sink pad".into()))?;
+
+        // Fires once the EOS we're about to inject has actually reached
+        // the branch (passed the queue's sink pad) - our signal that it's
+        // safe to tear the branch's elements down. Bounded by the
+        // `tokio::time::timeout` below regardless, so a branch that
+        // somehow never sees its own EOS (stuck muxer, etc.) can't hang
+        // a settings change forever - it just risks a slightly-truncated
+        // final segment file in that rare case, not a stuck server.
+        let (eos_tx, eos_rx) = tokio::sync::oneshot::channel();
+        let eos_tx = std::sync::Mutex::new(Some(eos_tx));
+        let probe_queue_sink = queue_sink.clone();
+        probe_queue_sink.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+            if let Some(gst::PadProbeData::Event(ev)) = &info.data {
+                if ev.type_() == gst::EventType::Eos {
+                    if let Some(tx) = eos_tx.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+
+        // Block the tee's pad for this branch first (guarantees no more
+        // real video buffers are in flight into it once this callback
+        // runs), then inject EOS directly into the branch from inside
+        // that same callback - after this, the branch only ever sees the
+        // EOS it's about to finalize on, never another real buffer.
+        let eos_queue_sink = queue_sink.clone();
+        branch
+            .tee_pad
+            .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, move |_pad, _info| {
+                let _ = eos_queue_sink.send_event(gst::event::Eos::new());
+                gst::PadProbeReturn::Ok
+            });
+
+        let _ = tokio::time::timeout(Duration::from_secs(5), eos_rx).await;
+
+        // Structural pipeline surgery (removing elements) must not
+        // happen synchronously from within the probe callback above -
+        // that callback runs on the pipeline's own streaming thread,
+        // and blocking it on `Element::remove`/`set_state` here risks
+        // deadlocking the pipeline. `call_async` runs this closure on a
+        // GStreamer-owned worker thread instead, which is the documented
+        // safe way to restructure a pipeline in response to a pad probe.
+        let RecordingBranch {
+            tee_pad,
+            queue,
+            splitmuxsink,
+            ..
+        } = branch;
+        let pipeline = self.pipeline.clone();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        pipeline.call_async(move |pipeline| {
+            let _ = queue.set_state(gst::State::Null);
+            let _ = splitmuxsink.set_state(gst::State::Null);
+            let _ = pipeline.remove_many([&queue, &splitmuxsink]);
+            if let Some(omni_tee) = pipeline.by_name("omni_tee") {
+                omni_tee.release_request_pad(&tee_pad);
+            }
+            let _ = done_tx.send(());
+        });
+        let _ = done_rx.await;
+        Ok(())
     }
 
     /// A fresh view of every `EncodedFrame` produced from this moment

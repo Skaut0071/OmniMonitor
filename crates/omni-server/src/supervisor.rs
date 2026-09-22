@@ -14,14 +14,26 @@
 //! - A camera being watched but not recorded/detected gets an ephemeral
 //!   pipeline: started on the first viewer, stopped when the last one
 //!   disconnects.
-//! - Changing a camera's settings (recording on/off, resolution, ...)
-//!   restarts its pipeline immediately so the change actually takes
-//!   effect - see `restart_if_running`. Active viewers of that camera are
-//!   deliberately disconnected (with a clear error) rather than left
-//!   silently frozen; the frontend already has a retry path for this.
-//!   Applying settings changes without dropping active viewers is future
-//!   work (see docs/ROADMAP.md) - it would need dynamic `tee` pad
-//!   add/remove instead of a full pipeline restart.
+//! - Changing a camera's settings applies immediately, via whichever of
+//!   two paths `apply_settings` decides is actually safe:
+//!   - Resolution, framerate, rotation, the timestamp overlay, an RTSP
+//!     URL edit, or motion detection turning on/off all change what's
+//!     actually being decoded/encoded - there's no way to apply those
+//!     except restarting the whole pipeline (`replace_pipeline`), which
+//!     deliberately disconnects active viewers (with a clear error)
+//!     rather than leaving them silently frozen; the frontend already
+//!     has a retry path for this.
+//!   - Recording turning on/off (an explicit toggle, a schedule boundary
+//!     crossing, or a segment-length change) doesn't change any of
+//!     that - only whether/how the recording branch is attached to the
+//!     otherwise-unchanged pipeline - so it's applied by dynamically
+//!     adding/removing that branch on the live pipeline instead
+//!     (`CaptureSession::set_recording`), which doesn't touch the live-
+//!     view branch at all and so doesn't disconnect anyone watching.
+//!
+//!   `apply_settings` tells these apart by comparing a `StructuralConfig`
+//!   snapshot (everything in the first list) against what the currently
+//!   running pipeline was actually built with.
 //! - `RecordingTrigger::Motion` ("only record while motion is detected")
 //!   deliberately does *not* work this way: the recording branch stays
 //!   present in the pipeline for as long as recording is enabled at all,
@@ -74,6 +86,30 @@ const DEFAULT_BITRATE: u32 = 2_000_000;
 /// intended.
 pub(crate) const MOTION_SEGMENT_SECONDS: u32 = 20;
 
+/// Everything about a `Camera` that determines the *shape* of its
+/// GStreamer pipeline - as opposed to whether/how the recording branch
+/// is attached to that shape, which `apply_settings` can change live.
+/// Recomputed on every settings change and compared against the value
+/// captured when the currently-running pipeline was built
+/// (`ManagedCamera::structural`); any difference means the pipeline has
+/// to be rebuilt, not just have a branch added/removed.
+#[derive(Debug, Clone, PartialEq)]
+struct StructuralConfig {
+    kind: CameraKind,
+    width: u32,
+    height: u32,
+    framerate: u32,
+    rotation: omni_core::Rotation,
+    overlay_timestamp: bool,
+    /// Whether the motion-detection appsink branch needs to exist at
+    /// all, i.e. `camera.motion.enabled || camera.recording.trigger ==
+    /// RecordingTrigger::Motion`. *Not* whether motion is currently
+    /// active - that never changes the pipeline's shape as of v0.12 (see
+    /// the module docs), only whether this branch exists in the first
+    /// place does.
+    need_motion: bool,
+}
+
 struct ManagedCamera {
     session: CaptureSession,
     capture_error: watch::Receiver<Option<String>>,
@@ -93,6 +129,9 @@ struct ManagedCamera {
     /// Cloned from `Camera::led_control` at spawn time - see the module
     /// docs' "LED ring control" section.
     led_control: omni_core::LedControl,
+    /// The pipeline-shape-relevant fields this instance was actually
+    /// built with - see `StructuralConfig`.
+    structural: StructuralConfig,
 }
 
 pub struct Supervisor {
@@ -181,21 +220,30 @@ impl Supervisor {
             .unwrap_or(false)
     }
 
-    fn pipeline_config(&self, camera: &Camera, motion_active_now: bool) -> PipelineConfig {
-        let source = match &camera.kind {
-            CameraKind::Usb { device_path } => CaptureSource::Usb {
-                device_path: device_path.clone(),
-            },
-            CameraKind::Rtsp { url } => CaptureSource::Rtsp { url: url.clone() },
-        };
-        let need_motion =
-            camera.motion.enabled || camera.recording.trigger == RecordingTrigger::Motion;
-        // Deliberately *not* gated on `motion_active_now` for
-        // `RecordingTrigger::Motion` - see the module docs' explanation of
-        // why that used to rebuild the pipeline (and disconnect live
-        // viewers) on every motion transition. The recording branch stays
-        // present the whole time recording is enabled; `motion_retention`
-        // prunes the resulting segments after the fact.
+    /// Whether the motion-detection appsink branch needs to exist at all
+    /// for `camera` - see `StructuralConfig::need_motion`.
+    fn need_motion(camera: &Camera) -> bool {
+        camera.motion.enabled || camera.recording.trigger == RecordingTrigger::Motion
+    }
+
+    fn structural_config(camera: &Camera) -> StructuralConfig {
+        StructuralConfig {
+            kind: camera.kind.clone(),
+            width: camera.width,
+            height: camera.height,
+            framerate: camera.framerate,
+            rotation: camera.rotation,
+            overlay_timestamp: camera.overlay_timestamp,
+            need_motion: Self::need_motion(camera),
+        }
+    }
+
+    /// The `RecordingSink` a camera's pipeline should currently have
+    /// attached, or `None` if it shouldn't be recording right now -
+    /// shared by `pipeline_config` (initial build) and `apply_settings`
+    /// (a later dynamic toggle), so the two can never disagree about
+    /// what "recording is currently on" means.
+    fn desired_recording(&self, camera: &Camera) -> Option<RecordingSink> {
         let recording_now =
             camera.recording.enabled && schedule_is_active_now(&camera.recording.schedule);
         let segment_seconds = if camera.recording.trigger == RecordingTrigger::Motion {
@@ -203,11 +251,27 @@ impl Supervisor {
         } else {
             camera.recording.segment_seconds
         };
-
-        let recording = recording_now.then(|| RecordingSink {
+        recording_now.then(|| RecordingSink {
             dir: self.recordings_dir(camera.id),
             segment_seconds,
-        });
+        })
+    }
+
+    fn pipeline_config(&self, camera: &Camera, motion_active_now: bool) -> PipelineConfig {
+        let source = match &camera.kind {
+            CameraKind::Usb { device_path } => CaptureSource::Usb {
+                device_path: device_path.clone(),
+            },
+            CameraKind::Rtsp { url } => CaptureSource::Rtsp { url: url.clone() },
+        };
+        let need_motion = Self::need_motion(camera);
+        // Deliberately *not* gated on `motion_active_now` for
+        // `RecordingTrigger::Motion` - see the module docs' explanation of
+        // why that used to rebuild the pipeline (and disconnect live
+        // viewers) on every motion transition. The recording branch stays
+        // present the whole time recording is enabled; `motion_retention`
+        // prunes the resulting segments after the fact.
+        let recording = self.desired_recording(camera);
         let motion = need_motion.then_some(MotionConfig {
             sensitivity: camera.motion.sensitivity,
             initial_active: motion_active_now,
@@ -275,6 +339,7 @@ impl Supervisor {
             viewers: AtomicUsize::new(0),
             keep_alive: AtomicBool::new(Self::keeps_pipeline_alive(camera)),
             led_control: camera.led_control.clone(),
+            structural: Self::structural_config(camera),
         }))
     }
 
@@ -333,17 +398,74 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Restarts `camera`'s pipeline immediately if one is currently
-    /// running, so a settings change (recording toggle, resolution, ...)
-    /// actually takes effect right away. No-op if nothing is running for
-    /// this camera - the next viewer/recording start will just pick up
-    /// the new settings naturally. Preserves the current motion-active
+    /// Unconditionally restarts `camera`'s pipeline if one is currently
+    /// running - no-op otherwise. Preserves the current motion-active
     /// state (if any) across the restart, so an in-progress
     /// motion-triggered recording isn't interrupted by an unrelated
-    /// settings tweak.
+    /// settings tweak. Prefer `apply_settings` for an actual settings
+    /// change - it only pays this cost (and disconnects active viewers)
+    /// when the change genuinely requires it; this is the primitive it
+    /// falls back to, kept available directly for callers that always
+    /// want a hard restart regardless (there currently are none outside
+    /// `apply_settings` itself, but it's a reasonable thing to want).
     pub async fn restart_if_running(self: &Arc<Self>, camera: &Camera) -> Result<(), CaptureError> {
         let motion_active = self.motion_active(camera.id).await;
         self.replace_pipeline(camera, motion_active).await
+    }
+
+    /// Applies a settings change to `camera`'s already-running pipeline,
+    /// if one is running - no-op otherwise (the caller, e.g.
+    /// `routes::update_camera`, separately calls `ensure_running` for a
+    /// camera that needs to start fresh). Takes the cheapest path that's
+    /// actually safe - see the module docs' "Changing a camera's
+    /// settings" section for the full explanation:
+    ///
+    /// - If `StructuralConfig` is unchanged from what the running
+    ///   pipeline was built with, only the recording branch is
+    ///   added/removed/reconfigured dynamically
+    ///   (`CaptureSession::set_recording`) - active viewers are
+    ///   completely undisturbed.
+    /// - Otherwise, falls back to `restart_if_running` (a full rebuild,
+    ///   disconnecting active viewers) - resolution, rotation, the
+    ///   overlay, an RTSP URL edit, or motion detection turning on/off
+    ///   all change what's actually being decoded/encoded, which a
+    ///   branch add/remove can't express.
+    pub async fn apply_settings(self: &Arc<Self>, camera: &Camera) -> Result<(), CaptureError> {
+        let managed = {
+            let map = self.cameras.read().await;
+            map.get(&camera.id).cloned()
+        };
+        let Some(managed) = managed else {
+            return Ok(());
+        };
+
+        if Self::structural_config(camera) != managed.structural {
+            return self.restart_if_running(camera).await;
+        }
+
+        managed
+            .session
+            .set_recording(self.desired_recording(camera))
+            .await
+            .map_err(|err| {
+                tracing::error!(camera = %camera.id, %err, "failed to apply recording change dynamically");
+                err
+            })?;
+
+        // Recording turning off can also mean this camera no longer
+        // needs to keep running with no viewers - mirror
+        // `ViewerGuard::drop`'s "last reason to exist just went away"
+        // teardown (LED off included) rather than leaving an idle
+        // pipeline holding the device open for nothing.
+        let new_keep_alive = Self::keeps_pipeline_alive(camera);
+        managed.keep_alive.store(new_keep_alive, Ordering::SeqCst);
+        if !new_keep_alive && managed.viewers.load(Ordering::SeqCst) == 0 {
+            if let Some(cmd) = &managed.led_control.off_command {
+                led::spawn_run(camera.id, "off", cmd.clone());
+            }
+            self.remove_if_current(camera.id, &managed).await;
+        }
+        Ok(())
     }
 
     /// Replaces `camera`'s running pipeline with a freshly built one

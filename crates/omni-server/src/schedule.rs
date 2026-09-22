@@ -1,12 +1,13 @@
 //! Periodically re-evaluates each camera's recording schedule
-//! (`omni_core::RecordingSchedule`) and rebuilds its pipeline when it
-//! crosses a scheduled start/end boundary.
+//! (`omni_core::RecordingSchedule`) and applies the change (via
+//! `Supervisor::apply_settings`) when it crosses a scheduled start/end
+//! boundary.
 //!
-//! Every other reason a pipeline gets rebuilt - a settings change, a
-//! motion transition - is triggered by something happening
-//! (`omni-server::routes::update_camera`, `spawn_motion_recording_
-//! watcher`). A schedule boundary is different: nothing "happens" at
-//! 22:00, time just passes, so something has to actually poll for it.
+//! Every other reason a pipeline gets its settings applied - an actual
+//! settings change, a schedule change - is triggered by something
+//! happening (`omni-server::routes::update_camera`). A schedule boundary
+//! is different: nothing "happens" at 22:00, time just passes, so
+//! something has to actually poll for it.
 //!
 //! Deliberately doesn't touch `Supervisor::keeps_pipeline_alive` (a
 //! schedule-gated camera's pipeline still runs continuously whenever
@@ -14,9 +15,7 @@
 //! closing a USB device exactly at every schedule boundary would add a
 //! real "device busy" risk (see `docs/ARCHITECTURE.md`) for no benefit;
 //! outside the window the pipeline just runs without its recording
-//! branch, same mechanism `RecordingTrigger::Motion` already uses for
-//! "recording branch present or absent based on something other than
-//! `recording.enabled` alone".
+//! branch, same dynamic add/remove mechanism used for a settings change.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,14 +61,21 @@ pub async fn run(supervisor: Arc<Supervisor>, db: Db) {
                 active,
                 "recording schedule boundary crossed, rebuilding pipeline"
             );
-            if let Err(err) = supervisor.restart_if_running(&camera).await {
-                tracing::warn!(camera = %camera.id, %err, "failed to rebuild pipeline for schedule change");
+            // `apply_settings` only touches a pipeline that's already
+            // running, and - since a schedule boundary never changes
+            // resolution/rotation/motion-detection-presence, only
+            // whether recording is currently active - takes the dynamic
+            // add/remove-the-recording-branch path rather than a full
+            // rebuild, so this doesn't disconnect anyone currently
+            // watching the camera live.
+            if let Err(err) = supervisor.apply_settings(&camera).await {
+                tracing::warn!(camera = %camera.id, %err, "failed to apply schedule change to pipeline");
                 continue;
             }
-            // `restart_if_running` only rebuilds a pipeline that was
-            // already running - a camera whose pipeline wasn't running
-            // yet (no viewers, motion detection not otherwise needed)
-            // needs an explicit start now that it's due to record.
+            // A camera whose pipeline wasn't running yet (no viewers,
+            // motion detection not otherwise needed) needs an explicit
+            // start now that it's due to record - `apply_settings` is a
+            // no-op for a camera with nothing running.
             if active {
                 if let Err(err) = supervisor.ensure_running(&camera).await {
                     tracing::warn!(camera = %camera.id, %err, "failed to start pipeline for scheduled recording");
