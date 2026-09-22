@@ -39,11 +39,40 @@
   let playbackRecording: RecordingInfo | null = null;
   let pendingSeekSeconds: number | null = null;
   let scrubTimestamp: string | null = null;
+  let isPlaying = false;
   let status: CameraViewStatus | "idle" = "idle";
   let errorMessage = "";
   let connection: CameraViewConnection | null = null;
   let camerasTimer: ReturnType<typeof setInterval>;
   let detailsTimer: ReturnType<typeof setInterval>;
+
+  // Scrubbing leaves the frame frozen (see `onScrubVideoLoaded`) until the
+  // viewer stops moving the playhead for a moment - then it resumes
+  // playing forward on its own, the way scrubbing a video editor's
+  // timeline and letting go does. Each new scrub event (wheel tick or
+  // click) pushes this back out, so it only actually fires once things
+  // settle.
+  const SCRUB_SETTLE_MS = 500;
+  let scrubSettleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function scheduleAutoResume() {
+    if (scrubSettleTimer) clearTimeout(scrubSettleTimer);
+    scrubSettleTimer = setTimeout(() => {
+      scrubSettleTimer = null;
+      videoEl?.play();
+    }, SCRUB_SETTLE_MS);
+  }
+
+  function cancelAutoResume() {
+    if (scrubSettleTimer) {
+      clearTimeout(scrubSettleTimer);
+      scrubSettleTimer = null;
+    }
+  }
+
+  // Oldest-first, so "previous"/"next segment" reads the same direction
+  // as the timeline itself (left = earlier).
+  $: sortedRecordings = [...recordings].sort((a, b) => a.started_at.localeCompare(b.started_at));
 
   $: statusById = new Map(statuses.map((s) => [s.id, s.status]));
   // Only cameras the supervisor currently has a live pipeline for are
@@ -134,6 +163,7 @@
   // loaded, which is cheap and doesn't re-buffer.
   function onTimelineScrub(e: CustomEvent<{ recording: RecordingInfo; offsetSeconds: number }>) {
     const { recording, offsetSeconds } = e.detail;
+    cancelAutoResume();
     if (mode !== "scrub") {
       disconnectLive();
       mode = "scrub";
@@ -144,6 +174,7 @@
     if (!videoEl) return;
     if (videoEl.srcObject) videoEl.srcObject = null;
     if (playbackRecording?.filename === recording.filename) {
+      videoEl.pause();
       videoEl.currentTime = offsetSeconds;
     } else {
       playbackRecording = recording;
@@ -151,6 +182,7 @@
       videoEl.src = recordingUrl(selectedCamera!.id, recording.filename);
       videoEl.load();
     }
+    scheduleAutoResume();
   }
 
   // A freshly (re)loaded recording lands here once, to apply whatever
@@ -158,7 +190,7 @@
   // afterward set `currentTime` directly in `onTimelineScrub` instead.
   function onScrubVideoLoaded() {
     if (!videoEl) return;
-    videoEl.pause(); // frame-scrub, not autoplay-forward through the segment
+    videoEl.pause(); // frame-scrub until the settle timer resumes it
     if (pendingSeekSeconds != null) {
       videoEl.currentTime = pendingSeekSeconds;
       pendingSeekSeconds = null;
@@ -166,10 +198,42 @@
   }
 
   function goLive() {
+    cancelAutoResume();
     mode = "live";
     playbackRecording = null;
     scrubTimestamp = null;
     connectLive();
+  }
+
+  function togglePlay() {
+    if (!videoEl || mode !== "scrub") return;
+    cancelAutoResume();
+    if (videoEl.paused) videoEl.play();
+    else videoEl.pause();
+  }
+
+  // "Previous"/"next segment" step through `sortedRecordings` relative to
+  // whatever's currently playing, always starting at its beginning - a
+  // coarser jump than scrubbing, for "show me the whole prior segment"
+  // rather than "show me a moment". From live (no current recording),
+  // "previous" jumps into the most recent segment, since there's nothing
+  // to step forward *from* yet.
+  function previousSegment() {
+    if (sortedRecordings.length === 0) return;
+    const idx = playbackRecording
+      ? sortedRecordings.findIndex((r) => r.filename === playbackRecording!.filename)
+      : sortedRecordings.length;
+    if (idx <= 0) return;
+    const target = sortedRecordings[idx - 1];
+    onTimelineScrub(new CustomEvent("scrub", { detail: { recording: target, offsetSeconds: 0 } }));
+  }
+
+  function nextSegment() {
+    if (!playbackRecording) return;
+    const idx = sortedRecordings.findIndex((r) => r.filename === playbackRecording!.filename);
+    if (idx === -1 || idx >= sortedRecordings.length - 1) return;
+    const target = sortedRecordings[idx + 1];
+    onTimelineScrub(new CustomEvent("scrub", { detail: { recording: target, offsetSeconds: 0 } }));
   }
 
   // Newest first, so the most recent motion event is always at the top
@@ -223,6 +287,7 @@
 
   onDestroy(() => {
     disconnectLive();
+    cancelAutoResume();
     clearInterval(camerasTimer);
     clearInterval(detailsTimer);
   });
@@ -261,6 +326,8 @@
           playsinline
           muted
           on:loadedmetadata={mode === "scrub" ? onScrubVideoLoaded : undefined}
+          on:play={() => (isPlaying = true)}
+          on:pause={() => (isPlaying = false)}
         ></video>
         {#if mode === "live" && status !== "live"}
           <div class="overlay">
@@ -292,6 +359,27 @@
             : " Recording is turned off for this camera."}
         </p>
       {:else}
+        <div class="playback-controls">
+          <button
+            class="ghost"
+            disabled={sortedRecordings.length === 0 ||
+              (playbackRecording != null && sortedRecordings[0]?.filename === playbackRecording.filename)}
+            on:click={previousSegment}
+          >
+            ⏮ Previous segment
+          </button>
+          <button class="ghost play-toggle" disabled={mode !== "scrub"} on:click={togglePlay}>
+            {isPlaying ? "⏸ Pause" : "▶ Play"}
+          </button>
+          <button
+            class="ghost"
+            disabled={!playbackRecording ||
+              sortedRecordings[sortedRecordings.length - 1]?.filename === playbackRecording.filename}
+            on:click={nextSegment}
+          >
+            Next segment ⏭
+          </button>
+        </div>
         <RecordingTimeline
           {recordings}
           {events}
@@ -474,6 +562,17 @@
     padding: 0.3rem 0.7rem;
     font-size: 0.75rem;
     cursor: pointer;
+  }
+  .ghost:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .playback-controls {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .play-toggle {
+    min-width: 5.5rem;
   }
 
   .event-track {

@@ -987,7 +987,7 @@ offset, and "Go live" reconnects the WebRTC session afterward.
 **Timeline scrubbing became a frame preview, not a segment player.**
 `RecordingTimeline.svelte`'s track gained an `on:wheel` handler alongside
 its existing click: scrolling over it nudges a `cursorSeconds` playhead
-(~4s per wheel notch, scaling naturally with a trackpad's finer deltas;
+(~15s per wheel notch, scaling naturally with a trackpad's finer deltas;
 `e.preventDefault()` stops the page itself from scrolling), and both
 interactions now dispatch the same `scrub` event (renamed from `seek`)
 continuously rather than once. `TimelineView.svelte` responds by moving a
@@ -1029,6 +1029,32 @@ fixes" section) taught this project to guard against. Verified against a
 real running camera, not just the parser: a browser screenshot of the
 live WebRTC feed shows the actual burned-in "HH:MM:SS DD/MM/YYYY" text in
 the corner, present only on the camera with the setting enabled.
+
+**Auto-resume, bigger scrub bar, transport buttons - immediate follow-up
+feedback on the above.** Freezing on a scrubbed frame forever turned out
+to be half the ask - actually watching what happened needed pressing
+"Go live" and re-scrubbing frame by frame, so `TimelineView.svelte` now
+starts a 500ms settle timer (`scheduleAutoResume`) on every scrub event,
+cleared and restarted by the next one; once scrubbing actually stops, it
+calls `videoEl.play()` and lets the segment play forward normally, the
+way releasing a video editor's jog wheel does. Manual transport - `⏮
+Previous segment` / `▶ Play` / `⏸ Pause` / `Next segment ⏭` - sits in a
+row above the bar rather than as native `<video controls>` (deliberately
+avoided - see the section above), driven by `sortedRecordings` (oldest-
+first) relative to `playbackRecording`; "previous" from live jumps into
+the most recent segment since there's nothing to step back *from* yet.
+`RecordingTimeline`'s track itself grew from 2.25rem to 4.25rem tall with
+larger hour-mark labels and added hourly tick lines (unlabeled, purely a
+visual aiming aid) - a day-wide bar makes even a 5-minute segment only a
+couple of pixels wide, so more height and reference lines matter more
+than the numbers alone. The wheel step went from ~4s to ~15s per notch:
+scrubbing a 24-hour bar at 4s/notch needs several thousand notches to
+cross the whole day, which felt like it scrolled forever exactly as
+reported. Verified live: scrubbing to a segment and letting go auto-plays
+it forward after the pause, the transport buttons enable/disable
+correctly at the ends of the recording list, and Next/Previous jump
+cleanly between segments' `src` (confirmed via the served recording
+URLs, not just UI state).
 
 ## Known limitations / honest gaps in v0.10/v0.11
 

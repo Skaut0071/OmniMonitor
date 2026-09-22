@@ -355,6 +355,15 @@ The three items deferred from v0.9 as "bigger, own milestone":
       against a real running camera: the burned-in timestamp is visible
       in a live WebRTC screenshot, present only on the camera with the
       setting on.
+- [x] **Timeline: auto-resume, bigger bar, transport buttons** (follow-up
+      feedback on the above): scrubbing and letting go for ~500ms now
+      auto-plays forward from that point instead of staying frozen
+      forever; `⏮ Previous segment` / `▶ Play` / `⏸ Pause` / `Next
+      segment ⏭` buttons sit above the bar (not native video controls);
+      the scrub bar itself is taller with bigger labels and hourly tick
+      lines to make aiming at a specific time easier; the wheel now moves
+      ~15s per notch instead of ~4s, since a full day's timeline at the
+      old rate took thousands of notches to cross. Verified live.
 
 ## Later / unscheduled
 

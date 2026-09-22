@@ -56,6 +56,10 @@
   $: dayEvents = events.filter((e) => dayKey(e.started_at) === selectedDay);
 
   const HOUR_MARKS = [0, 3, 6, 9, 12, 15, 18, 21, 24];
+  // Unlabeled hourly tick lines in the track itself (labels only every 3h
+  // above it) - purely a visual aid for aiming a click/scrub at a
+  // specific time on a now-taller, easier-to-target bar.
+  const MINOR_TICKS = Array.from({ length: 23 }, (_, i) => i + 1);
 
   function widthPercent(): number {
     return Math.max((segmentSeconds / DAY_SECONDS) * 100, 0.15); // floor so short segments stay clickable/visible
@@ -98,14 +102,15 @@
 
   // Scrolling over the timeline scrubs through time directly, like a
   // video editor's jog wheel, instead of the browser scrolling the page -
-  // ~4s per wheel notch (100 is a typical Chrome/Firefox deltaY per
-  // notch), scaling naturally with a trackpad's finer continuous deltas.
+  // ~15s per wheel notch (100 is a typical Chrome/Firefox deltaY per
+  // notch; a full day at 4s/notch felt glacial - see docs/ARCHITECTURE.md),
+  // scaling naturally with a trackpad's finer continuous deltas.
   function onTrackWheel(e: WheelEvent) {
     if (!selectedDay) return;
     e.preventDefault();
     const now = new Date();
     const base = cursorSeconds ?? now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
-    moveCursorTo(base + (e.deltaY / 100) * 4);
+    moveCursorTo(base + (e.deltaY / 100) * 15);
   }
 
   $: cursorPercent = cursorSeconds != null ? (cursorSeconds / DAY_SECONDS) * 100 : null;
@@ -138,6 +143,9 @@
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div class="track" on:click={onTrackClick} on:wheel={onTrackWheel}>
+      {#each MINOR_TICKS as h (h)}
+        <div class="tick" style="left: {(h / 24) * 100}%;"></div>
+      {/each}
       {#each dayRecordings as rec (rec.filename)}
         <div
           class="segment"
@@ -200,8 +208,8 @@
   }
   .hour-marks {
     position: relative;
-    height: 0.9rem;
-    font-size: 0.65rem;
+    height: 1.1rem;
+    font-size: 0.75rem;
     color: var(--text-dim);
   }
   .hour-marks span {
@@ -210,17 +218,24 @@
   }
   .track {
     position: relative;
-    height: 2.25rem;
+    height: 4.25rem;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 6px;
     cursor: pointer;
     overflow: hidden;
   }
+  .tick {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--border);
+  }
   .segment {
     position: absolute;
-    top: 0.35rem;
-    height: 1rem;
+    top: 0.6rem;
+    height: 2rem;
     background: var(--accent);
     opacity: 0.6;
     border-radius: 2px;
@@ -230,8 +245,8 @@
   }
   .motion-mark {
     position: absolute;
-    bottom: 0.3rem;
-    height: 0.35rem;
+    bottom: 0.5rem;
+    height: 0.5rem;
     background: #f1c40f;
     border-radius: 2px;
   }
