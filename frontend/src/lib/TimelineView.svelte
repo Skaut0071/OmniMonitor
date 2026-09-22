@@ -1,6 +1,17 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import { getCamerasStatus, listMotionEvents, type CameraStatusInfo, type MotionEvent } from "./api";
+  import RecordingTimeline from "./RecordingTimeline.svelte";
+  import {
+    getCamerasStatus,
+    listCameras,
+    listMotionEvents,
+    listRecordings,
+    recordingUrl,
+    type Camera,
+    type CameraStatusInfo,
+    type MotionEvent,
+    type RecordingInfo,
+  } from "./api";
   import {
     connectCameraView,
     SETTINGS_CHANGED_MESSAGE,
@@ -8,29 +19,43 @@
     type CameraViewStatus,
   } from "./webrtc-view";
 
-  let cameras: CameraStatusInfo[] = [];
+  let cameras: Camera[] = [];
+  let statuses: CameraStatusInfo[] = [];
   let selectedId: string | null = null;
+  let recordings: RecordingInfo[] = [];
   let events: MotionEvent[] = [];
-  let videoEl: HTMLVideoElement;
+
+  // "live" watches the camera's real-time WebRTC feed (like the dashboard
+  // tiles); "playback" plays a recorded segment instead, entered by
+  // scrubbing the timeline below the video - this is what lets a viewer
+  // rewind straight from this tab instead of opening the Recordings modal.
+  let mode: "live" | "playback" = "live";
+  let videoEl: HTMLVideoElement | undefined;
+  let seekToSeconds: number | null = null;
   let status: CameraViewStatus | "idle" = "idle";
   let errorMessage = "";
   let connection: CameraViewConnection | null = null;
   let camerasTimer: ReturnType<typeof setInterval>;
-  let eventsTimer: ReturnType<typeof setInterval>;
+  let detailsTimer: ReturnType<typeof setInterval>;
 
+  $: statusById = new Map(statuses.map((s) => [s.id, s.status]));
   // Only cameras the supervisor currently has a live pipeline for are
-  // worth offering here - an offline/errored camera has no video feed to
-  // show, so it would just be a dead entry in the list.
-  $: onlineCameras = cameras.filter((c) => c.status === "online" || c.status === "streaming");
+  // worth offering here - an offline/errored camera has no live feed, and
+  // its recordings are still reachable from the Recordings modal.
+  $: onlineCameras = cameras.filter((c) => {
+    const st = statusById.get(c.id);
+    return st === "online" || st === "streaming";
+  });
   $: selectedCamera = cameras.find((c) => c.id === selectedId) ?? null;
+  $: selectedStatus = selectedId ? statusById.get(selectedId) : undefined;
 
   async function refreshCameras() {
     try {
-      cameras = await getCamerasStatus();
-      // If the previously-selected camera went offline, drop the live
-      // connection rather than leaving a dead video element around.
+      const [camList, statusList] = await Promise.all([listCameras(), getCamerasStatus()]);
+      cameras = camList;
+      statuses = statusList;
       if (selectedId && !cameras.some((c) => c.id === selectedId)) {
-        disconnect();
+        disconnectLive();
         selectedId = null;
       }
     } catch {
@@ -38,26 +63,32 @@
     }
   }
 
-  async function refreshEvents() {
+  async function refreshDetails() {
     if (!selectedId) {
+      recordings = [];
       events = [];
       return;
     }
     try {
-      events = await listMotionEvents(selectedId);
+      const [recs, evs] = await Promise.all([
+        listRecordings(selectedId),
+        listMotionEvents(selectedId),
+      ]);
+      recordings = recs;
+      events = evs;
     } catch {
       // Transient - the next poll will retry.
     }
   }
 
-  function disconnect() {
+  function disconnectLive() {
     connection?.disconnect();
     connection = null;
     status = "idle";
     errorMessage = "";
   }
 
-  function connect() {
+  function connectLive() {
     if (!selectedId || !videoEl) return;
     errorMessage = "";
     const cameraId = selectedId;
@@ -68,9 +99,9 @@
         // Not a real failure - the server tore this viewer down because
         // the camera's settings changed, so reconnect automatically
         // instead of leaving the timeline view stuck on an error.
-        if (message === SETTINGS_CHANGED_MESSAGE && selectedId === cameraId) {
+        if (message === SETTINGS_CHANGED_MESSAGE && selectedId === cameraId && mode === "live") {
           connection?.disconnect();
-          connect();
+          connectLive();
         }
       },
     });
@@ -78,15 +109,57 @@
 
   async function select(id: string) {
     if (selectedId === id) return;
-    disconnect();
+    disconnectLive();
+    mode = "live";
     selectedId = id;
-    await refreshEvents();
-    connect();
+    await refreshDetails();
+    connectLive();
+  }
+
+  function onTimelineSeek(e: CustomEvent<{ recording: RecordingInfo; offsetSeconds: number }>) {
+    disconnectLive();
+    mode = "playback";
+    seekToSeconds = e.detail.offsetSeconds;
+    playbackRecording = e.detail.recording;
+  }
+
+  let playbackRecording: RecordingInfo | null = null;
+
+  function onPlaybackLoaded() {
+    if (seekToSeconds != null && videoEl) {
+      videoEl.currentTime = seekToSeconds;
+      seekToSeconds = null;
+    }
+  }
+
+  function goLive() {
+    mode = "live";
+    playbackRecording = null;
+    connectLive();
   }
 
   // Newest first, so the most recent motion event is always at the top
-  // of the vertical timeline without the viewer having to scroll down.
+  // of the vertical list without the viewer having to scroll down.
   $: sortedEvents = [...events].sort((a, b) => b.started_at.localeCompare(a.started_at));
+
+  // Jumps playback to a motion event clicked in the vertical list, the
+  // same way clicking its mark on the horizontal timeline would - saves
+  // hunting for the right spot on the scrubber by eye.
+  function jumpToEvent(ev: MotionEvent) {
+    if (!selectedCamera) return;
+    const t = new Date(ev.started_at).getTime();
+    const segmentMs = selectedCamera.recording.segment_seconds * 1000;
+    const hit = recordings.find((r) => {
+      const startMs = new Date(r.started_at).getTime();
+      return t >= startMs && t < startMs + segmentMs;
+    });
+    if (!hit) return;
+    const startMs = new Date(hit.started_at).getTime();
+    disconnectLive();
+    mode = "playback";
+    seekToSeconds = (t - startMs) / 1000;
+    playbackRecording = hit;
+  }
 
   function formatTime(iso: string): string {
     return new Date(iso).toLocaleString(undefined, {
@@ -110,13 +183,15 @@
   onMount(() => {
     refreshCameras();
     camerasTimer = setInterval(refreshCameras, 10_000);
-    eventsTimer = setInterval(refreshEvents, 15_000);
+    // Keeps the scrub timeline's segment list current while a camera is
+    // selected, so a just-finished segment appears without reselecting.
+    detailsTimer = setInterval(refreshDetails, 15_000);
   });
 
   onDestroy(() => {
-    disconnect();
+    disconnectLive();
     clearInterval(camerasTimer);
-    clearInterval(eventsTimer);
+    clearInterval(detailsTimer);
   });
 </script>
 
@@ -130,7 +205,7 @@
         {#each onlineCameras as camera (camera.id)}
           <li>
             <button class:active={selectedId === camera.id} on:click={() => select(camera.id)}>
-              <span class="dot" class:live={camera.status === "streaming"}></span>
+              <span class="dot" class:live={statusById.get(camera.id) === "streaming"}></span>
               {camera.name}
             </button>
           </li>
@@ -142,23 +217,55 @@
   <main class="feed">
     {#if !selectedCamera}
       <div class="placeholder">
-        <p>Select a camera to watch its live feed.</p>
+        <p>Select a camera to watch its feed.</p>
       </div>
     {:else}
       <div class="video-wrap">
-        <!-- svelte-ignore a11y-media-has-caption -->
-        <video bind:this={videoEl} autoplay playsinline muted></video>
-        {#if status !== "live"}
-          <div class="overlay">
-            {#if status === "error"}
-              <span>⚠ {errorMessage || "stream error"}</span>
-            {:else}
-              <span>Connecting…</span>
-            {/if}
-          </div>
+        {#if mode === "live"}
+          <!-- svelte-ignore a11y-media-has-caption -->
+          <video bind:this={videoEl} autoplay playsinline muted></video>
+          {#if status !== "live"}
+            <div class="overlay">
+              {#if status === "error"}
+                <span>⚠ {errorMessage || "stream error"}</span>
+              {:else}
+                <span>Connecting…</span>
+              {/if}
+            </div>
+          {/if}
+        {:else if playbackRecording}
+          <!-- svelte-ignore a11y-media-has-caption -->
+          <video
+            bind:this={videoEl}
+            src={recordingUrl(selectedCamera.id, playbackRecording.filename)}
+            controls
+            autoplay
+            on:loadedmetadata={onPlaybackLoaded}
+          ></video>
+          <button class="live-badge" on:click={goLive}>⏺ Go live</button>
         {/if}
       </div>
-      <p class="feed-name">{selectedCamera.name}</p>
+      <div class="feed-header">
+        <p class="feed-name">{selectedCamera.name}</p>
+        {#if mode === "playback"}
+          <button class="ghost" on:click={goLive}>Back to live</button>
+        {/if}
+      </div>
+
+      {#if recordings.length === 0}
+        <p class="hint">
+          No recordings to scrub yet.{selectedCamera.recording.enabled
+            ? ""
+            : " Recording is turned off for this camera."}
+        </p>
+      {:else}
+        <RecordingTimeline
+          {recordings}
+          {events}
+          segmentSeconds={selectedCamera.recording.segment_seconds}
+          on:seek={onTimelineSeek}
+        />
+      {/if}
     {/if}
   </main>
 
@@ -173,10 +280,10 @@
         {#each sortedEvents as ev (ev.id)}
           <li>
             <span class="marker" class:ongoing={!ev.ended_at}></span>
-            <div class="event-body">
+            <button class="event-body" on:click={() => jumpToEvent(ev)}>
               <span class="event-time">{formatTime(ev.started_at)}</span>
               <span class="event-duration">{durationLabel(ev)}</span>
-            </div>
+            </button>
           </li>
         {/each}
       </ol>
@@ -255,7 +362,7 @@
   .feed {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.6rem;
   }
   .placeholder {
     background: var(--surface);
@@ -291,11 +398,37 @@
     font-size: 0.9rem;
     background: rgba(0, 0, 0, 0.35);
   }
+  .live-badge {
+    position: absolute;
+    top: 0.6rem;
+    right: 0.6rem;
+    background: rgba(0, 0, 0, 0.65);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    color: #fff;
+    border-radius: 999px;
+    padding: 0.3rem 0.7rem;
+    font-size: 0.72rem;
+    cursor: pointer;
+  }
+  .feed-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
   .feed-name {
     margin: 0;
     font-weight: 600;
     font-size: 0.9rem;
     color: var(--text);
+  }
+  .ghost {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 6px;
+    padding: 0.3rem 0.7rem;
+    font-size: 0.75rem;
+    cursor: pointer;
   }
 
   .event-track {
@@ -340,10 +473,18 @@
     display: flex;
     flex-direction: column;
     gap: 0.1rem;
+    background: transparent;
+    border: none;
+    padding: 0;
+    text-align: left;
+    cursor: pointer;
   }
   .event-time {
     font-size: 0.8rem;
     color: var(--text);
+  }
+  .event-body:hover .event-time {
+    color: var(--accent);
   }
   .event-duration {
     font-size: 0.72rem;

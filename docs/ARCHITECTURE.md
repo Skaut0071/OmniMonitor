@@ -957,16 +957,30 @@ nav entry alongside "Dashboard"/"Status": a list of cameras whose
 `GET /api/cameras/status`, polled every 10s); clicking one connects its
 live feed via the same `connectCameraView`/`SETTINGS_CHANGED_MESSAGE`
 auto-retry path `CameraTile`/`ExpandedCameraModal` already use (see
-"Post-v0.10 fixes" above), so a settings change mid-session reconnects
-instead of erroring out; and a vertical timeline of that camera's motion
+"Post-v0.10 fixes" above); and a vertical list of that camera's motion
 events (`GET /api/cameras/:id/events`, polled every 15s), newest first,
 each with a marker dot (red/pulsing while `ended_at` is still null, i.e.
-ongoing) and a formatted timestamp/duration. No new API routes - it reuses
-the same endpoints `RecordingsModal`/`StatusOverview` already call.
-Verified in a real headless-browser session against a running server: the
-camera list populates, selecting a camera renders real live video from
-the capture pipeline, and the empty states (no cameras online, no events
-yet) render correctly.
+ongoing) and a formatted timestamp/duration.
+
+The video area isn't live-only: it reuses `RecordingTimeline.svelte` (the
+same per-day scrubbable segment/event bar `RecordingsModal` already uses,
+see "v0.10" above) directly under the video, plus `listRecordings`/
+`GET /api/recordings/:camera/:filename`. Scrubbing to a point on that bar
+disconnects the WebRTC live session, switches the `<video>` element to
+play the containing recording segment from the right offset (`mode:
+"live" | "playback"`, mirroring `RecordingsModal`'s own `selected`/
+`seekToSeconds` pattern), and shows a "Go live" button to reconnect - so
+rewinding to something a motion event flagged doesn't require leaving the
+tab to open the Recordings modal. Clicking an event in the vertical list
+does the same seek (`jumpToEvent`: finds which recording's
+`[started_at, started_at + segment_seconds)` window contains the event's
+timestamp) as a shortcut over eyeballing the scrub bar. No new API routes
+- everything here reuses endpoints `RecordingsModal`/`StatusOverview`
+already call. Verified in a real headless-browser session against a
+running server, including with real recorded `.webm` segments: the camera
+list populates, live video renders from the capture pipeline, scrubbing
+the timeline switches to real recorded video playback at the clicked
+offset, and "Go live" reconnects the WebRTC session afterward.
 
 ## Known limitations / honest gaps in v0.10/v0.11
 

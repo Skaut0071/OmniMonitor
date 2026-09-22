@@ -322,10 +322,17 @@ The three items deferred from v0.9 as "bigger, own milestone":
       appearing/disappearing at the configured window's edges.
 - [x] **Timeline tab**: new `TimelineView.svelte` - a list of currently
       online cameras, click one to watch its live feed as the main
-      content, with a vertical timeline of that camera's motion events on
-      the side. Reuses the existing status/events endpoints and the same
-      live-view connection code as the dashboard tiles. Verified with a
-      headless browser against a running server.
+      content, with a vertical list of that camera's motion events on the
+      side. The video area is rewindable in place: a scrubbable per-day
+      timeline (reusing `RecordingTimeline.svelte` from the Recordings
+      modal) sits under it, and dragging/clicking a point on it - or an
+      event in the side list - switches straight to that recorded segment
+      instead of requiring a trip to the Recordings modal; a "Go live"
+      button returns to the live feed. Reuses the existing status/events/
+      recordings endpoints and the same live-view connection code as the
+      dashboard tiles - no new API routes. Verified with a headless
+      browser against a running server, including scrubbing into real
+      recorded video and back to live.
 
 ## Later / unscheduled
 
