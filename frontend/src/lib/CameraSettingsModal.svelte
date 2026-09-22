@@ -39,6 +39,7 @@
   let webhookUrl = camera.motion.webhook_url ?? "";
 
   let rotation: Rotation = camera.rotation;
+  let overlayTimestamp = camera.overlay_timestamp;
   let group = camera.group ?? "";
 
   let ageEnabled = camera.recording.retention_max_age_secs != null;
@@ -140,6 +141,7 @@
           webhook_url: trimmedWebhook || null,
         },
         rotation,
+        overlay_timestamp: overlayTimestamp,
         group: trimmedGroup,
       });
       dispatch("updated");
@@ -279,6 +281,16 @@
     <p class="hint">
       For a camera mounted sideways or upside down. Applied to the live view, recordings, and RTSP
       alike - takes effect after saving, disconnecting anyone currently watching this camera.
+    </p>
+
+    <label class="row">
+      <input type="checkbox" bind:checked={overlayTimestamp} disabled={!wasmReady} />
+      Show timestamp overlay
+    </label>
+    <p class="hint">
+      Burns the current date/time onto the video itself (bottom-right corner), so it's in the live
+      view, recordings, and RTSP alike - takes effect after saving, disconnecting anyone currently
+      watching this camera.
     </p>
 
     <label>

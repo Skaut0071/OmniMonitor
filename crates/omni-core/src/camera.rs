@@ -203,6 +203,12 @@ pub struct Camera {
     pub motion: MotionSettings,
     #[serde(default)]
     pub rotation: Rotation,
+    /// Burns the current wall-clock date/time into the video itself (via
+    /// the capture pipeline, like `rotation` - so it's in the live view,
+    /// recordings, and the RTSP re-serve alike, not just an overlay drawn
+    /// by the browser). Off by default since not everyone wants it.
+    #[serde(default)]
+    pub overlay_timestamp: bool,
     /// Lower sorts first in the dashboard grid; ties broken by creation
     /// order. Only meaningful relative to other cameras' values - set via
     /// `PUT /api/cameras/reorder`, not directly.
@@ -236,6 +242,7 @@ impl Camera {
             recording: RecordingSettings::default(),
             motion: MotionSettings::default(),
             rotation: Rotation::default(),
+            overlay_timestamp: false,
             sort_order: 0,
             group: None,
             status: None,

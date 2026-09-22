@@ -79,6 +79,7 @@ struct CameraRow {
     motion_sensitivity: i64,
     motion_webhook_url: Option<String>,
     rotation: String,
+    overlay_timestamp: bool,
     sort_order: i64,
     camera_group: Option<String>,
     schedule_enabled: bool,
@@ -154,6 +155,7 @@ impl TryFrom<CameraRow> for Camera {
                 webhook_url: row.motion_webhook_url,
             },
             rotation,
+            overlay_timestamp: row.overlay_timestamp,
             sort_order: row.sort_order,
             group: row.camera_group,
             status: None,
@@ -317,6 +319,8 @@ impl Db {
             "ALTER TABLE cameras ADD COLUMN schedule_days TEXT NOT NULL DEFAULT '1111111'",
             "ALTER TABLE cameras ADD COLUMN schedule_start_minute INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE cameras ADD COLUMN schedule_end_minute INTEGER NOT NULL DEFAULT 1439",
+            // v0.11.1: burned-in timestamp overlay.
+            "ALTER TABLE cameras ADD COLUMN overlay_timestamp INTEGER NOT NULL DEFAULT 0",
         ] {
             if let Err(err) = sqlx::query(stmt).execute(&self.pool).await {
                 let msg = err.to_string();
@@ -382,10 +386,10 @@ impl Db {
                 recording_enabled, recording_trigger, segment_seconds,
                 retention_max_age_secs, retention_max_size_bytes,
                 motion_enabled, motion_sensitivity, motion_webhook_url,
-                rotation, sort_order, camera_group,
+                rotation, overlay_timestamp, sort_order, camera_group,
                 schedule_enabled, schedule_days, schedule_start_minute, schedule_end_minute
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 kind = excluded.kind,
@@ -405,6 +409,7 @@ impl Db {
                 motion_sensitivity = excluded.motion_sensitivity,
                 motion_webhook_url = excluded.motion_webhook_url,
                 rotation = excluded.rotation,
+                overlay_timestamp = excluded.overlay_timestamp,
                 sort_order = excluded.sort_order,
                 camera_group = excluded.camera_group,
                 schedule_enabled = excluded.schedule_enabled,
@@ -432,6 +437,7 @@ impl Db {
         .bind(camera.motion.sensitivity as i64)
         .bind(&camera.motion.webhook_url)
         .bind(rotation)
+        .bind(camera.overlay_timestamp)
         .bind(camera.sort_order)
         .bind(&camera.group)
         .bind(camera.recording.schedule.enabled)

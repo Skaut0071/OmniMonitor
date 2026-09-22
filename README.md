@@ -7,13 +7,15 @@ for a Ubiquiti-Protect-style dashboard UI/UX with **USB webcams treated as
 first-class cameras** - plug in a UVC camera over USB and it gets the same
 live-preview and recording pipeline a network/RTSP camera would.
 
-Status: **Alpha (v0.11)**. Mobile-friendly dashboard. Live preview over WebRTC (trickle ICE, with
+Status: **Alpha (v0.11.1)**. Mobile-friendly dashboard. Live preview over WebRTC (trickle ICE, with
 click-to-expand and live-view zoom), a Timeline tab (pick an online camera,
-watch its live feed alongside a vertical motion-event timeline),
+watch its live feed, and scroll/click a per-day timeline to preview a
+recorded frame from any moment without opening the Recordings modal),
 drag-and-drop dashboard reordering, camera groups/tabs, a no-video status
-overview (online/offline/USB vs network), camera rotation, continuous or
-motion-triggered segmented recording with a scrubbable per-day timeline,
-an optional day/time recording schedule, and retention, motion
+overview (online/offline/USB vs network), camera rotation, an optional
+burned-in timestamp overlay, continuous or motion-triggered segmented
+recording with a scrubbable per-day timeline, an optional day/time
+recording schedule, and retention, motion
 detection with webhook alerts, single-account login with brute-force
 lockout, an authenticated RTSP server that re-serves every camera (USB
 included) to third-party NVR/VMS/player software, and ONVIF

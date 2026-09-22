@@ -40,6 +40,7 @@ export interface Camera {
   recording: RecordingSettings;
   motion: MotionSettings;
   rotation: Rotation;
+  overlay_timestamp: boolean;
   sort_order: number;
   group?: string;
   status?: "idle" | "streaming" | "error";
@@ -70,6 +71,7 @@ export interface UpdateCameraRequest {
   recording?: RecordingSettings;
   motion?: MotionSettings;
   rotation?: Rotation;
+  overlay_timestamp?: boolean;
   group?: string;
 }
 

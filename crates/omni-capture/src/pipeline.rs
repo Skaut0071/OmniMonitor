@@ -178,6 +178,14 @@ pub struct PipelineConfig {
     pub recording: Option<RecordingSink>,
     pub motion: Option<MotionConfig>,
     pub rotation: omni_core::Rotation,
+    /// Burns the current wall-clock date/time into the encoded output
+    /// (live view, recordings, RTSP re-serve - everything downstream of
+    /// `omni_tee`) via a `clockoverlay` element. Deliberately placed
+    /// *after* `raw_tee`, not before it, so the motion-detection branch
+    /// never sees it: an overlay redrawn once a second would register as
+    /// constant "motion" to the consecutive-frame-diffing in
+    /// `omni_capture::pipeline`'s motion detector.
+    pub overlay_timestamp: bool,
 }
 
 /// `gst-plugins-good`'s `videoflip` `method` property for each rotation -
@@ -220,11 +228,22 @@ impl CaptureSession {
     /// (H.264 or whatever the camera sends): it autodetects and inserts
     /// the right depayloader/parser/decoder chain.
     pub fn start(config: PipelineConfig) -> Result<CaptureHandle, CaptureError> {
+        // Inserted between raw_tee and the encoder only (see
+        // `PipelineConfig::overlay_timestamp`'s docs for why not earlier),
+        // so it's present in the encoded output but invisible to the
+        // separate low-res motion-detection branch off the same tee.
+        let overlay = if config.overlay_timestamp {
+            "! clockoverlay time-format=\"%H:%M:%S %d/%m/%Y\" halignment=right valignment=bottom \
+             shaded-background=true font-desc=\"Sans, 14\" "
+        } else {
+            ""
+        };
         let mut description = format!(
             "{source} ! decodebin ! videoflip method={flip} ! videoconvert ! videoscale ! videorate \
              ! video/x-raw,width={width},height={height},framerate={fps}/1 \
              ! tee name=raw_tee \
              raw_tee. ! queue max-size-buffers=4 leaky=downstream \
+                {overlay}\
                 ! vp8enc deadline=1 target-bitrate={bitrate} cpu-used=4 keyframe-max-dist=60 end-usage=cbr \
                 ! tee name=omni_tee \
              omni_tee. ! queue max-size-buffers=4 leaky=downstream \
@@ -535,6 +554,17 @@ mod tests {
                 panic!("rotation {rotation:?} (videoflip method={method:?}) rejected by gst_parse_launch: {e}")
             });
         }
+    }
+
+    #[test]
+    fn timestamp_overlay_fragment_is_valid() {
+        omni_gstreamer_test_init();
+        let description = "videotestsrc num-buffers=1 \
+             ! clockoverlay time-format=\"%H:%M:%S %d/%m/%Y\" halignment=right valignment=bottom \
+               shaded-background=true font-desc=\"Sans, 14\" \
+             ! fakesink";
+        gst::parse::launch(description)
+            .unwrap_or_else(|e| panic!("clockoverlay fragment rejected by gst_parse_launch: {e}"));
     }
 
     fn omni_gstreamer_test_init() {

@@ -23,9 +23,17 @@
   let seekToSeconds: number | null = null;
   let videoEl: HTMLVideoElement | undefined;
 
-  function onTimelineSeek(e: CustomEvent<{ recording: RecordingInfo; offsetSeconds: number }>) {
-    selected = e.detail.recording;
-    seekToSeconds = e.detail.offsetSeconds;
+  function onTimelineScrub(e: CustomEvent<{ recording: RecordingInfo; offsetSeconds: number }>) {
+    const { recording, offsetSeconds } = e.detail;
+    // Scrubbing (mouse wheel) fires repeatedly while staying on the same
+    // recording - once it's already loaded, seek directly instead of
+    // waiting on `loadedmetadata`, which only fires once per `src`.
+    if (selected?.filename === recording.filename && videoEl) {
+      videoEl.currentTime = offsetSeconds;
+    } else {
+      selected = recording;
+      seekToSeconds = offsetSeconds;
+    }
   }
 
   function onVideoLoaded() {
@@ -140,7 +148,7 @@
           {recordings}
           {events}
           segmentSeconds={camera.recording.segment_seconds}
-          on:seek={onTimelineSeek}
+          on:scrub={onTimelineScrub}
         />
         <div class="body">
           <div class="list">

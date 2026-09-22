@@ -982,6 +982,54 @@ list populates, live video renders from the capture pipeline, scrubbing
 the timeline switches to real recorded video playback at the clicked
 offset, and "Go live" reconnects the WebRTC session afterward.
 
+## Timeline scrub-and-preview, burned-in timestamp overlay (v0.11.1)
+
+**Timeline scrubbing became a frame preview, not a segment player.**
+`RecordingTimeline.svelte`'s track gained an `on:wheel` handler alongside
+its existing click: scrolling over it nudges a `cursorSeconds` playhead
+(~4s per wheel notch, scaling naturally with a trackpad's finer deltas;
+`e.preventDefault()` stops the page itself from scrolling), and both
+interactions now dispatch the same `scrub` event (renamed from `seek`)
+continuously rather than once. `TimelineView.svelte` responds by moving a
+*paused* `<video>`'s `currentTime` rather than opening a `controls
+autoplay` player - scrubbing is meant to answer "what happened around
+this moment", not play a whole segment start to finish. A single
+`<video>` element is reused across live and scrub modes (imperatively
+swapping `srcObject` vs `src`, never letting Svelte recreate the element)
+specifically so rapid wheel ticks don't reload/flicker; `src` itself is
+only reassigned when a scrub actually crosses into a different recording
+file, otherwise it's just a `currentTime` write. A small on-screen
+timestamp readout (computed client-side from the recording's
+`started_at` + offset) shows what moment is being previewed, and a "Go
+live"/"Back to live" affordance reconnects the WebRTC session. The same
+component's own consumer, `RecordingsModal`, keeps working (`on:scrub`
+now, `selected`/`seekToSeconds` logic tightened the same way - see its
+inline comment) and incidentally gained wheel-scrubbing too, for free.
+
+**Burned-in timestamp overlay.** A new per-camera `overlay_timestamp:
+bool` (`omni_core::Camera`, alongside `rotation` - same "whole-pipeline,
+not browser-side" philosophy, migrated/validated/routed the same way)
+inserts a GStreamer `clockoverlay` into `omni_capture::pipeline`'s encode
+branch when enabled: `time-format="%H:%M:%S %d/%m/%Y"`,
+bottom-right, shaded background. Deliberately spliced in *after*
+`raw_tee`, not before it - the motion-detection branch reads from the
+same tee, and text that redraws once a second would register as constant
+"motion" to its consecutive-frame differencing otherwise. Because it's in
+the shared pipeline (not a browser overlay), the timestamp is baked into
+the live view, every recorded segment, and the RTSP re-serve alike, and -
+unlike the file-mtime-derived `RecordingInfo.started_at` approximation
+used elsewhere (see "Recording and retention" above) - it's an actual
+per-frame wall-clock stamp with no segment-boundary guesswork. Off by
+default. A regression test (`timestamp_overlay_fragment_is_valid`,
+mirroring `every_rotation_is_a_valid_videoflip_method`) builds the
+`clockoverlay` fragment against `gst_parse_launch` so a bad property name
+or enum nick fails a unit test instead of shipping silently broken, the
+same failure mode the rotation bug (`docs/ARCHITECTURE.md`'s "Post-v0.10
+fixes" section) taught this project to guard against. Verified against a
+real running camera, not just the parser: a browser screenshot of the
+live WebRTC feed shows the actual burned-in "HH:MM:SS DD/MM/YYYY" text in
+the corner, present only on the camera with the setting enabled.
+
 ## Known limitations / honest gaps in v0.10/v0.11
 
 - **Single admin account and single RTSP credential, not

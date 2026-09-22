@@ -334,6 +334,28 @@ The three items deferred from v0.9 as "bigger, own milestone":
       browser against a running server, including scrubbing into real
       recorded video and back to live.
 
+## v0.11.1 - scrub-to-preview, timestamp overlay - done
+
+- [x] **Timeline: scroll-to-preview instead of segment playback**: the
+      Timeline tab's scrub bar now responds to the mouse wheel (like a
+      jog wheel), and both wheel and click show a frozen frame at that
+      moment - no native player controls, no autoplay-through-the-segment
+      - instead of opening a full `controls autoplay` player, so you can
+      see what happened at a point in time without leaving the tab or
+      stepping through segments by hand. A "Go live" button returns to
+      the live feed. Verified live: scrubbing switches to the correct
+      recorded frame, a second scrub on the same segment doesn't reload
+      the video, and going live reconnects WebRTC.
+- [x] **Camera setting: burned-in timestamp overlay**: a per-camera
+      `overlay_timestamp` toggle burns the current date/time onto the
+      video itself via GStreamer's `clockoverlay`, in the live view,
+      recordings, and RTSP alike - not just a browser-side overlay, and
+      not subject to the file-mtime-approximation caveat that
+      `RecordingInfo.started_at` has elsewhere. Off by default. Verified
+      against a real running camera: the burned-in timestamp is visible
+      in a live WebRTC screenshot, present only on the camera with the
+      setting on.
+
 ## Later / unscheduled
 
 - [ ] Apply camera settings changes (recording toggle, resolution, motion

@@ -205,6 +205,7 @@ impl Supervisor {
             recording,
             motion,
             rotation: camera.rotation,
+            overlay_timestamp: camera.overlay_timestamp,
         }
     }
 

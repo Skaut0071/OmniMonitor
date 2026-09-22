@@ -401,6 +401,7 @@ async fn create_camera(
         recording: RecordingSettings::default(),
         motion: MotionSettings::default(),
         rotation: Rotation::default(),
+        overlay_timestamp: false,
         sort_order,
         group: None,
         status: None,
@@ -453,6 +454,7 @@ struct UpdateCameraRequest {
     recording: Option<UpdateRecordingRequest>,
     motion: Option<UpdateMotionRequest>,
     rotation: Option<Rotation>,
+    overlay_timestamp: Option<bool>,
     /// `Some("")` (or whitespace-only) clears the group; `None` leaves it
     /// unchanged - same convention as `motion.webhook_url`.
     group: Option<String>,
@@ -540,6 +542,10 @@ async fn update_camera(
 
     if let Some(rotation) = req.rotation {
         camera.rotation = rotation;
+    }
+
+    if let Some(overlay_timestamp) = req.overlay_timestamp {
+        camera.overlay_timestamp = overlay_timestamp;
     }
 
     if let Some(group) = req.group {

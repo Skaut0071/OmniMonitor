@@ -7,7 +7,7 @@
   export let segmentSeconds: number;
 
   const dispatch = createEventDispatcher<{
-    seek: { recording: RecordingInfo; offsetSeconds: number };
+    scrub: { recording: RecordingInfo; offsetSeconds: number };
   }>();
 
   const DAY_SECONDS = 86_400;
@@ -67,22 +67,48 @@
     return Math.max((secs / DAY_SECONDS) * 100, 0.2);
   }
 
-  function onTrackClick(e: MouseEvent) {
+  // The playhead: seconds-since-midnight on `selectedDay` that the video
+  // is currently showing a frame from. Driven by both a click (jump
+  // straight there) and a wheel scroll (nudge it, like a jog wheel) -
+  // either way it's the single source of truth for where the preview
+  // frame comes from, so both interactions stay in sync with what's drawn.
+  let cursorSeconds: number | null = null;
+
+  function recordingAt(seconds: number): { recording: RecordingInfo; offsetSeconds: number } | null {
+    const hit = dayRecordings.find((r) => {
+      const startSecs = secondsSinceMidnight(r.started_at);
+      return seconds >= startSecs && seconds < startSecs + segmentSeconds;
+    });
+    return hit ? { recording: hit, offsetSeconds: seconds - secondsSinceMidnight(hit.started_at) } : null;
+  }
+
+  function moveCursorTo(seconds: number) {
     if (!selectedDay) return;
+    cursorSeconds = Math.min(DAY_SECONDS - 1, Math.max(0, seconds));
+    const hit = recordingAt(cursorSeconds);
+    if (hit) dispatch("scrub", hit);
+  }
+
+  function onTrackClick(e: MouseEvent) {
     const track = e.currentTarget as HTMLElement;
     const rect = track.getBoundingClientRect();
     const fraction = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-    const clickedSeconds = fraction * DAY_SECONDS;
-
-    const hit = dayRecordings.find((r) => {
-      const startSecs = secondsSinceMidnight(r.started_at);
-      return clickedSeconds >= startSecs && clickedSeconds < startSecs + segmentSeconds;
-    });
-    if (hit) {
-      const offsetSeconds = clickedSeconds - secondsSinceMidnight(hit.started_at);
-      dispatch("seek", { recording: hit, offsetSeconds });
-    }
+    moveCursorTo(fraction * DAY_SECONDS);
   }
+
+  // Scrolling over the timeline scrubs through time directly, like a
+  // video editor's jog wheel, instead of the browser scrolling the page -
+  // ~4s per wheel notch (100 is a typical Chrome/Firefox deltaY per
+  // notch), scaling naturally with a trackpad's finer continuous deltas.
+  function onTrackWheel(e: WheelEvent) {
+    if (!selectedDay) return;
+    e.preventDefault();
+    const now = new Date();
+    const base = cursorSeconds ?? now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+    moveCursorTo(base + (e.deltaY / 100) * 4);
+  }
+
+  $: cursorPercent = cursorSeconds != null ? (cursorSeconds / DAY_SECONDS) * 100 : null;
 </script>
 
 <div class="timeline">
@@ -111,7 +137,7 @@
 
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="track" on:click={onTrackClick}>
+    <div class="track" on:click={onTrackClick} on:wheel={onTrackWheel}>
       {#each dayRecordings as rec (rec.filename)}
         <div
           class="segment"
@@ -126,10 +152,13 @@
           style="left: {percentOfDay(ev.started_at)}%; width: {eventWidthPercent(ev)}%;"
         ></div>
       {/each}
+      {#if cursorPercent != null}
+        <div class="playhead" style="left: {cursorPercent}%;"></div>
+      {/if}
     </div>
     <p class="hint">
-      Click a segment to play it from that point. Times are approximate - see
-      docs/ARCHITECTURE.md.
+      Scroll over the timeline to scrub through time, or click to jump straight there. Times are
+      approximate - see docs/ARCHITECTURE.md.
     </p>
   {/if}
 </div>
@@ -205,6 +234,15 @@
     height: 0.35rem;
     background: #f1c40f;
     border-radius: 2px;
+  }
+  .playhead {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: #fff;
+    box-shadow: 0 0 4px rgba(255, 255, 255, 0.7);
+    pointer-events: none;
   }
   .hint {
     color: var(--text-dim);

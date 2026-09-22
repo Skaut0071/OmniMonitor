@@ -26,12 +26,19 @@
   let events: MotionEvent[] = [];
 
   // "live" watches the camera's real-time WebRTC feed (like the dashboard
-  // tiles); "playback" plays a recorded segment instead, entered by
-  // scrubbing the timeline below the video - this is what lets a viewer
-  // rewind straight from this tab instead of opening the Recordings modal.
-  let mode: "live" | "playback" = "live";
+  // tiles); "scrub" shows a frozen frame from a recorded segment, driven
+  // by the timeline below the video - this is what lets a viewer rewind
+  // straight from this tab instead of opening the Recordings modal and
+  // playing through segments one at a time. One persistent <video>
+  // element is reused across both (swapping `srcObject` vs `src`
+  // imperatively) rather than letting Svelte recreate the element on
+  // every mode change, which would otherwise reload/flicker on each wheel
+  // tick while scrubbing.
+  let mode: "live" | "scrub" = "live";
   let videoEl: HTMLVideoElement | undefined;
-  let seekToSeconds: number | null = null;
+  let playbackRecording: RecordingInfo | null = null;
+  let pendingSeekSeconds: number | null = null;
+  let scrubTimestamp: string | null = null;
   let status: CameraViewStatus | "idle" = "idle";
   let errorMessage = "";
   let connection: CameraViewConnection | null = null;
@@ -47,7 +54,6 @@
     return st === "online" || st === "streaming";
   });
   $: selectedCamera = cameras.find((c) => c.id === selectedId) ?? null;
-  $: selectedStatus = selectedId ? statusById.get(selectedId) : undefined;
 
   async function refreshCameras() {
     try {
@@ -90,6 +96,10 @@
 
   function connectLive() {
     if (!selectedId || !videoEl) return;
+    if (videoEl.hasAttribute("src")) {
+      videoEl.removeAttribute("src");
+      videoEl.load();
+    }
     errorMessage = "";
     const cameraId = selectedId;
     connection = connectCameraView(cameraId, videoEl, {
@@ -111,30 +121,54 @@
     if (selectedId === id) return;
     disconnectLive();
     mode = "live";
+    playbackRecording = null;
     selectedId = id;
     await refreshDetails();
     connectLive();
   }
 
-  function onTimelineSeek(e: CustomEvent<{ recording: RecordingInfo; offsetSeconds: number }>) {
-    disconnectLive();
-    mode = "playback";
-    seekToSeconds = e.detail.offsetSeconds;
-    playbackRecording = e.detail.recording;
+  // Fires on every click *and* every wheel tick from RecordingTimeline -
+  // scrubbing needs to feel immediate, so this only reloads the <video>'s
+  // `src` when the scrub actually crossed into a different recording
+  // file; otherwise it just moves `currentTime` on the element already
+  // loaded, which is cheap and doesn't re-buffer.
+  function onTimelineScrub(e: CustomEvent<{ recording: RecordingInfo; offsetSeconds: number }>) {
+    const { recording, offsetSeconds } = e.detail;
+    if (mode !== "scrub") {
+      disconnectLive();
+      mode = "scrub";
+    }
+    scrubTimestamp = new Date(
+      new Date(recording.started_at).getTime() + offsetSeconds * 1000,
+    ).toLocaleString();
+    if (!videoEl) return;
+    if (videoEl.srcObject) videoEl.srcObject = null;
+    if (playbackRecording?.filename === recording.filename) {
+      videoEl.currentTime = offsetSeconds;
+    } else {
+      playbackRecording = recording;
+      pendingSeekSeconds = offsetSeconds;
+      videoEl.src = recordingUrl(selectedCamera!.id, recording.filename);
+      videoEl.load();
+    }
   }
 
-  let playbackRecording: RecordingInfo | null = null;
-
-  function onPlaybackLoaded() {
-    if (seekToSeconds != null && videoEl) {
-      videoEl.currentTime = seekToSeconds;
-      seekToSeconds = null;
+  // A freshly (re)loaded recording lands here once, to apply whatever
+  // scrub offset was requested when its `src` changed; same-file scrubs
+  // afterward set `currentTime` directly in `onTimelineScrub` instead.
+  function onScrubVideoLoaded() {
+    if (!videoEl) return;
+    videoEl.pause(); // frame-scrub, not autoplay-forward through the segment
+    if (pendingSeekSeconds != null) {
+      videoEl.currentTime = pendingSeekSeconds;
+      pendingSeekSeconds = null;
     }
   }
 
   function goLive() {
     mode = "live";
     playbackRecording = null;
+    scrubTimestamp = null;
     connectLive();
   }
 
@@ -142,9 +176,9 @@
   // of the vertical list without the viewer having to scroll down.
   $: sortedEvents = [...events].sort((a, b) => b.started_at.localeCompare(a.started_at));
 
-  // Jumps playback to a motion event clicked in the vertical list, the
-  // same way clicking its mark on the horizontal timeline would - saves
-  // hunting for the right spot on the scrubber by eye.
+  // Jumps the scrub position to a motion event clicked in the vertical
+  // list, the same way clicking/scrolling its mark on the horizontal
+  // timeline would - saves hunting for the right spot on the bar by eye.
   function jumpToEvent(ev: MotionEvent) {
     if (!selectedCamera) return;
     const t = new Date(ev.started_at).getTime();
@@ -155,10 +189,9 @@
     });
     if (!hit) return;
     const startMs = new Date(hit.started_at).getTime();
-    disconnectLive();
-    mode = "playback";
-    seekToSeconds = (t - startMs) / 1000;
-    playbackRecording = hit;
+    onTimelineScrub(
+      new CustomEvent("scrub", { detail: { recording: hit, offsetSeconds: (t - startMs) / 1000 } }),
+    );
   }
 
   function formatTime(iso: string): string {
@@ -221,33 +254,33 @@
       </div>
     {:else}
       <div class="video-wrap">
-        {#if mode === "live"}
-          <!-- svelte-ignore a11y-media-has-caption -->
-          <video bind:this={videoEl} autoplay playsinline muted></video>
-          {#if status !== "live"}
-            <div class="overlay">
-              {#if status === "error"}
-                <span>⚠ {errorMessage || "stream error"}</span>
-              {:else}
-                <span>Connecting…</span>
-              {/if}
-            </div>
+        <!-- svelte-ignore a11y-media-has-caption -->
+        <video
+          bind:this={videoEl}
+          autoplay={mode === "live"}
+          playsinline
+          muted
+          on:loadedmetadata={mode === "scrub" ? onScrubVideoLoaded : undefined}
+        ></video>
+        {#if mode === "live" && status !== "live"}
+          <div class="overlay">
+            {#if status === "error"}
+              <span>⚠ {errorMessage || "stream error"}</span>
+            {:else}
+              <span>Connecting…</span>
+            {/if}
+          </div>
+        {/if}
+        {#if mode === "scrub"}
+          {#if scrubTimestamp}
+            <span class="scrub-time">{scrubTimestamp}</span>
           {/if}
-        {:else if playbackRecording}
-          <!-- svelte-ignore a11y-media-has-caption -->
-          <video
-            bind:this={videoEl}
-            src={recordingUrl(selectedCamera.id, playbackRecording.filename)}
-            controls
-            autoplay
-            on:loadedmetadata={onPlaybackLoaded}
-          ></video>
           <button class="live-badge" on:click={goLive}>⏺ Go live</button>
         {/if}
       </div>
       <div class="feed-header">
         <p class="feed-name">{selectedCamera.name}</p>
-        {#if mode === "playback"}
+        {#if mode === "scrub"}
           <button class="ghost" on:click={goLive}>Back to live</button>
         {/if}
       </div>
@@ -263,7 +296,7 @@
           {recordings}
           {events}
           segmentSeconds={selectedCamera.recording.segment_seconds}
-          on:seek={onTimelineSeek}
+          on:scrub={onTimelineScrub}
         />
       {/if}
     {/if}
@@ -409,6 +442,18 @@
     padding: 0.3rem 0.7rem;
     font-size: 0.72rem;
     cursor: pointer;
+  }
+  .scrub-time {
+    position: absolute;
+    bottom: 0.6rem;
+    left: 0.6rem;
+    background: rgba(0, 0, 0, 0.65);
+    color: #fff;
+    border-radius: 6px;
+    padding: 0.25rem 0.6rem;
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
   }
   .feed-header {
     display: flex;
