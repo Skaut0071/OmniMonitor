@@ -309,6 +309,24 @@ The three items deferred from v0.9 as "bigger, own milestone":
       deliberately unreachable RTSP address, TEST-NET `192.0.2.55`
       (offline, correctly took ~2s to time out).
 
+## v0.11 - recording schedule, Timeline tab - done
+
+- [x] **Recording schedule**: `RecordingSchedule` (enabled, days-of-week,
+      start/end time) added to `RecordingSettings`, editable from
+      `CameraSettingsModal`. Gates `Supervisor::pipeline_config`'s
+      `recording_now` the same way motion-gating already did, plus a new
+      `omni-server::schedule` background task that rebuilds a camera's
+      pipeline exactly when it crosses a scheduled boundary. Deliberately
+      doesn't affect live view - the camera stays watchable any time, only
+      recording is gated. Verified live with real recording segments
+      appearing/disappearing at the configured window's edges.
+- [x] **Timeline tab**: new `TimelineView.svelte` - a list of currently
+      online cameras, click one to watch its live feed as the main
+      content, with a vertical timeline of that camera's motion events on
+      the side. Reuses the existing status/events endpoints and the same
+      live-view connection code as the dashboard tiles. Verified with a
+      headless browser against a running server.
+
 ## Later / unscheduled
 
 - [ ] Apply camera settings changes (recording toggle, resolution, motion

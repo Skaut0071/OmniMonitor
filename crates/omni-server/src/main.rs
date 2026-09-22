@@ -3,6 +3,7 @@ mod discovery;
 mod motion;
 mod onvif_discovery;
 mod reachability;
+mod schedule;
 mod retention;
 mod routes;
 mod rtsp;
@@ -62,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(retention::run(db.clone(), PathBuf::from(&config.data_dir)));
     tokio::spawn(auth::run_session_sweeper(db.clone()));
+    tokio::spawn(schedule::run(Arc::clone(&supervisor), db.clone()));
 
     let login_rate_limiter = Arc::new(auth::LoginRateLimiter::new());
     tokio::spawn(auth::run_login_rate_limiter_sweeper(Arc::clone(

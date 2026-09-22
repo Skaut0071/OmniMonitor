@@ -61,3 +61,8 @@ pub fn validate_password(password: &str) -> Result<(), JsError> {
 pub fn validate_group_name(name: &str) -> Result<(), JsError> {
     validate::validate_group_name(name).map_err(|e| JsError::new(&e.to_string()))
 }
+
+#[wasm_bindgen]
+pub fn validate_schedule_minute(minute: u16) -> Result<(), JsError> {
+    validate::validate_schedule_minute(minute).map_err(|e| JsError::new(&e.to_string()))
+}

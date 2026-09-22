@@ -60,15 +60,80 @@ pub enum RecordingTrigger {
     Motion,
 }
 
+/// Restricts recording to specific days/times of the week - independent
+/// of `RecordingTrigger` (e.g. "continuous, but only overnight" or "only
+/// on motion, and only on weekdays" both make sense). `enabled: false`
+/// means no restriction at all - recording follows `trigger` alone, same
+/// as before this existed.
+///
+/// Deliberately just data plus a pure predicate here (no clock access -
+/// this crate stays usable from `omni-wasm`/the browser, which has no
+/// business asking "what time is it on the server"); the actual "is it
+/// currently within the scheduled window" check lives in
+/// `omni-server::supervisor`, which has both a real clock and the
+/// server's local timezone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingSchedule {
+    pub enabled: bool,
+    /// One flag per weekday, Monday first (index 0) - matches
+    /// `chrono::Weekday::num_days_from_monday()`, so the caller
+    /// evaluating this doesn't have to translate between the two.
+    pub days: [bool; 7],
+    /// Minutes since local midnight, 0-1439.
+    pub start_minute: u16,
+    /// Minutes since local midnight, 0-1439. Less than `start_minute`
+    /// means the window wraps past midnight (e.g. 22:00-06:00).
+    pub end_minute: u16,
+}
+
+impl Default for RecordingSchedule {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            days: [true; 7],
+            start_minute: 0,
+            end_minute: 1439,
+        }
+    }
+}
+
+impl RecordingSchedule {
+    /// Pure predicate: is `minute_of_day` (0-1439) on `weekday_mon0`
+    /// (0=Monday..6=Sunday) inside the scheduled window? Always `true`
+    /// when the schedule itself is disabled - "no schedule" means "no
+    /// restriction", not "never record".
+    pub fn is_active_at(&self, weekday_mon0: u8, minute_of_day: u16) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        let Some(&is_scheduled_day) = self.days.get(weekday_mon0 as usize) else {
+            return false;
+        };
+        if !is_scheduled_day {
+            return false;
+        }
+        if self.start_minute <= self.end_minute {
+            (self.start_minute..=self.end_minute).contains(&minute_of_day)
+        } else {
+            // Wraps past midnight, e.g. 22:00-06:00: "active" is
+            // everything from start to end-of-day, plus everything from
+            // start-of-day to end - the two halves of the wrapped range.
+            minute_of_day >= self.start_minute || minute_of_day <= self.end_minute
+        }
+    }
+}
+
 /// Continuous loop-recording settings for one camera. When `enabled`, the
 /// capture pipeline gains a second branch (GStreamer `splitmuxsink`) that
-/// writes fixed-length segment files to disk indefinitely (or only while
-/// motion is active, if `trigger` is `Motion` - gated by a GStreamer
-/// `valve` toggled live, no pipeline restart needed); a background reaper
-/// (`omni-server::retention`) deletes the oldest segments once
-/// `retention_max_age_secs` and/or `retention_max_size_bytes` is exceeded -
-/// "forever loop" recording bounded by age and/or total size, whichever
-/// limit is hit first.
+/// writes fixed-length segment files to disk indefinitely, or only while
+/// motion is active (if `trigger` is `Motion`) and/or only within
+/// `schedule`'s window if that's enabled - both are whole-pipeline-rebuild
+/// decisions (see `docs/ARCHITECTURE.md`'s "Motion detection" section for
+/// why, including a GStreamer `valve` that was tried and abandoned), not
+/// a live-toggled element. A background reaper (`omni-server::retention`)
+/// deletes the oldest segments once `retention_max_age_secs` and/or
+/// `retention_max_size_bytes` is exceeded - "forever loop" recording
+/// bounded by age and/or total size, whichever limit is hit first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordingSettings {
     pub enabled: bool,
@@ -81,6 +146,8 @@ pub struct RecordingSettings {
     /// Delete oldest segments once the camera's recordings directory
     /// exceeds this many bytes. `None` = no size limit.
     pub retention_max_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub schedule: RecordingSchedule,
 }
 
 impl Default for RecordingSettings {
@@ -91,6 +158,7 @@ impl Default for RecordingSettings {
             segment_seconds: 300,
             retention_max_age_secs: None,
             retention_max_size_bytes: None,
+            schedule: RecordingSchedule::default(),
         }
     }
 }
@@ -183,4 +251,51 @@ pub struct MotionEvent {
     pub camera_id: Uuid,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schedule(days: [bool; 7], start: u16, end: u16) -> RecordingSchedule {
+        RecordingSchedule { enabled: true, days, start_minute: start, end_minute: end }
+    }
+
+    #[test]
+    fn disabled_schedule_is_always_active() {
+        let s = RecordingSchedule { enabled: false, days: [false; 7], start_minute: 0, end_minute: 0 };
+        // Every day disallowed, every minute out of a normally-empty
+        // window - still "active", because a disabled schedule means no
+        // restriction at all, not "restricted to nothing".
+        assert!(s.is_active_at(0, 0));
+        assert!(s.is_active_at(6, 1439));
+    }
+
+    #[test]
+    fn same_day_window_boundaries_are_inclusive() {
+        let s = schedule([true; 7], 60, 120); // 01:00-02:00
+        assert!(!s.is_active_at(0, 59));
+        assert!(s.is_active_at(0, 60));
+        assert!(s.is_active_at(0, 90));
+        assert!(s.is_active_at(0, 120));
+        assert!(!s.is_active_at(0, 121));
+    }
+
+    #[test]
+    fn wrapping_window_spans_midnight() {
+        let s = schedule([true; 7], 22 * 60, 6 * 60); // 22:00-06:00
+        assert!(s.is_active_at(0, 23 * 60)); // 23:00, before midnight
+        assert!(s.is_active_at(0, 0)); // exactly midnight
+        assert!(s.is_active_at(0, 5 * 60 + 59)); // 05:59, after midnight
+        assert!(!s.is_active_at(0, 12 * 60)); // noon - outside the window
+    }
+
+    #[test]
+    fn day_of_week_restriction_is_honored() {
+        let mut days = [false; 7];
+        days[5] = true; // Saturday only
+        let s = schedule(days, 0, 1439);
+        assert!(s.is_active_at(5, 600));
+        assert!(!s.is_active_at(4, 600)); // Friday
+    }
 }

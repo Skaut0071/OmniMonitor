@@ -31,6 +31,28 @@ fn hash_token(token: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// `RecordingSchedule::days` as a 7-character '0'/'1' string, Monday
+/// first - see `CameraRow::schedule_days`'s docs for why this encoding.
+fn format_schedule_days(days: &[bool; 7]) -> String {
+    days.iter().map(|&d| if d { '1' } else { '0' }).collect()
+}
+
+fn parse_schedule_days(s: &str) -> Result<[bool; 7]> {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() != 7 {
+        anyhow::bail!("schedule_days must be exactly 7 characters, got {:?}", s);
+    }
+    let mut days = [false; 7];
+    for (i, c) in chars.into_iter().enumerate() {
+        days[i] = match c {
+            '1' => true,
+            '0' => false,
+            other => anyhow::bail!("schedule_days must only contain 0/1, found {other:?}"),
+        };
+    }
+    Ok(days)
+}
+
 #[derive(Clone)]
 pub struct Db {
     pool: SqlitePool,
@@ -59,6 +81,14 @@ struct CameraRow {
     rotation: String,
     sort_order: i64,
     camera_group: Option<String>,
+    schedule_enabled: bool,
+    /// 7 characters of '0'/'1', Monday first - a plain TEXT encoding of
+    /// `RecordingSchedule::days` rather than 7 separate boolean columns
+    /// or a join table, since it's only ever read/written as a whole
+    /// unit, never queried by individual day.
+    schedule_days: String,
+    schedule_start_minute: i64,
+    schedule_end_minute: i64,
 }
 
 impl TryFrom<CameraRow> for Camera {
@@ -95,6 +125,7 @@ impl TryFrom<CameraRow> for Camera {
             "counter_clockwise90" => Rotation::CounterClockwise90,
             other => anyhow::bail!("unknown rotation in db: {other}"),
         };
+        let schedule_days = parse_schedule_days(&row.schedule_days)?;
         Ok(Camera {
             id: Uuid::parse_str(&row.id)?,
             name: row.name,
@@ -110,6 +141,12 @@ impl TryFrom<CameraRow> for Camera {
                 segment_seconds: row.segment_seconds as u32,
                 retention_max_age_secs: row.retention_max_age_secs.map(|v| v as u64),
                 retention_max_size_bytes: row.retention_max_size_bytes.map(|v| v as u64),
+                schedule: omni_core::RecordingSchedule {
+                    enabled: row.schedule_enabled,
+                    days: schedule_days,
+                    start_minute: row.schedule_start_minute as u16,
+                    end_minute: row.schedule_end_minute as u16,
+                },
             },
             motion: MotionSettings {
                 enabled: row.motion_enabled,
@@ -275,6 +312,11 @@ impl Db {
             "ALTER TABLE cameras ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
             // v0.10: organizational groups/tabs.
             "ALTER TABLE cameras ADD COLUMN camera_group TEXT",
+            // v0.11: recording schedule.
+            "ALTER TABLE cameras ADD COLUMN schedule_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE cameras ADD COLUMN schedule_days TEXT NOT NULL DEFAULT '1111111'",
+            "ALTER TABLE cameras ADD COLUMN schedule_start_minute INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE cameras ADD COLUMN schedule_end_minute INTEGER NOT NULL DEFAULT 1439",
         ] {
             if let Err(err) = sqlx::query(stmt).execute(&self.pool).await {
                 let msg = err.to_string();
@@ -340,9 +382,10 @@ impl Db {
                 recording_enabled, recording_trigger, segment_seconds,
                 retention_max_age_secs, retention_max_size_bytes,
                 motion_enabled, motion_sensitivity, motion_webhook_url,
-                rotation, sort_order, camera_group
+                rotation, sort_order, camera_group,
+                schedule_enabled, schedule_days, schedule_start_minute, schedule_end_minute
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 kind = excluded.kind,
@@ -363,7 +406,11 @@ impl Db {
                 motion_webhook_url = excluded.motion_webhook_url,
                 rotation = excluded.rotation,
                 sort_order = excluded.sort_order,
-                camera_group = excluded.camera_group
+                camera_group = excluded.camera_group,
+                schedule_enabled = excluded.schedule_enabled,
+                schedule_days = excluded.schedule_days,
+                schedule_start_minute = excluded.schedule_start_minute,
+                schedule_end_minute = excluded.schedule_end_minute
             "#,
         )
         .bind(camera.id.to_string())
@@ -387,6 +434,10 @@ impl Db {
         .bind(rotation)
         .bind(camera.sort_order)
         .bind(&camera.group)
+        .bind(camera.recording.schedule.enabled)
+        .bind(format_schedule_days(&camera.recording.schedule.days))
+        .bind(camera.recording.schedule.start_minute as i64)
+        .bind(camera.recording.schedule.end_minute as i64)
         .execute(&self.pool)
         .await?;
         Ok(())

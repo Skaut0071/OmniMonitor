@@ -6,6 +6,7 @@
     validate_sensitivity,
     validate_webhook_url,
     validate_group_name,
+    validate_schedule_minute,
   } from "./wasm/omni_wasm.js";
   import { updateCamera, type Camera, type RecordingTrigger, type Rotation } from "./api";
 
@@ -52,6 +53,29 @@
     : 10;
   let sizeUnit: SizeUnit = "GB";
 
+  const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+  function minutesToTime(minutes: number): string {
+    const h = Math.floor(minutes / 60)
+      .toString()
+      .padStart(2, "0");
+    const m = (minutes % 60).toString().padStart(2, "0");
+    return `${h}:${m}`;
+  }
+
+  function timeToMinutes(time: string): number {
+    const [h, m] = time.split(":").map(Number);
+    return h * 60 + m;
+  }
+
+  let scheduleEnabled = camera.recording.schedule.enabled;
+  // Copy, not a reference to the prop's array - toggling a day mutates
+  // this in place (see the day-toggle button below) and shouldn't touch
+  // `camera` until Save is actually clicked.
+  let scheduleDays = [...camera.recording.schedule.days];
+  let scheduleStartTime = minutesToTime(camera.recording.schedule.start_minute);
+  let scheduleEndTime = minutesToTime(camera.recording.schedule.end_minute);
+
   let error = "";
   let wasmReady = false;
   let saving = false;
@@ -72,6 +96,8 @@
     const maxSizeBytes = sizeEnabled ? Math.round(sizeValue * SIZE_UNIT_BYTES[sizeUnit]) : null;
     const trimmedWebhook = webhookUrl.trim();
     const trimmedGroup = group.trim();
+    const scheduleStartMinute = timeToMinutes(scheduleStartTime);
+    const scheduleEndMinute = timeToMinutes(scheduleEndTime);
 
     try {
       validate_segment_seconds(segmentSeconds);
@@ -85,6 +111,8 @@
         validate_webhook_url(trimmedWebhook);
       }
       validate_group_name(trimmedGroup);
+      validate_schedule_minute(scheduleStartMinute);
+      validate_schedule_minute(scheduleEndMinute);
     } catch (e) {
       error = (e as Error).message;
       return;
@@ -99,6 +127,12 @@
           segment_seconds: segmentSeconds,
           retention_max_age_secs: maxAgeSecs,
           retention_max_size_bytes: maxSizeBytes,
+          schedule: {
+            enabled: scheduleEnabled,
+            days: scheduleDays,
+            start_minute: scheduleStartMinute,
+            end_minute: scheduleEndMinute,
+          },
         },
         motion: {
           enabled: motionEnabled,
@@ -196,6 +230,38 @@
             <option value="TB">TB</option>
           </select>
         </div>
+      {/if}
+
+      <label class="row">
+        <input type="checkbox" bind:checked={scheduleEnabled} disabled={!wasmReady} />
+        Only record during scheduled times
+      </label>
+      {#if scheduleEnabled}
+        <div class="day-toggles">
+          {#each DAY_LABELS as label, i (label)}
+            <button
+              type="button"
+              class:active={scheduleDays[i]}
+              on:click={() => (scheduleDays[i] = !scheduleDays[i])}
+              disabled={!wasmReady}>{label}</button
+            >
+          {/each}
+        </div>
+        <div class="schedule-time-row">
+          <label>
+            From
+            <input type="time" bind:value={scheduleStartTime} disabled={!wasmReady} />
+          </label>
+          <label>
+            To
+            <input type="time" bind:value={scheduleEndTime} disabled={!wasmReady} />
+          </label>
+        </div>
+        <p class="hint">
+          Recording only happens during this window on the checked days (an end time earlier than
+          the start time spans past midnight). Live view isn't affected - the camera itself is
+          still watchable any time.
+        </p>
       {/if}
     {/if}
 
@@ -338,6 +404,37 @@
   }
   .unit-row input {
     flex: 1;
+  }
+  .day-toggles {
+    display: flex;
+    gap: 0.3rem;
+    margin-left: 1.6rem;
+  }
+  .day-toggles button {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 6px;
+    padding: 0.3rem 0;
+    font-size: 0.72rem;
+    cursor: pointer;
+  }
+  .day-toggles button.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+  .schedule-time-row {
+    display: flex;
+    gap: 0.75rem;
+    margin-left: 1.6rem;
+  }
+  .schedule-time-row label {
+    flex: 1;
+  }
+  .schedule-time-row input {
+    width: 100%;
   }
   .error {
     color: #e74c3c;

@@ -915,7 +915,60 @@ regression covered above):
   overflowed off-screen with no visible scrollbar despite technically
   being scrollable.
 
-## Known limitations / honest gaps in v0.10
+## Recording schedule and the Timeline tab (v0.11)
+
+**Recording schedule.** `RecordingSettings` gained a `schedule:
+RecordingSchedule` field (`omni_core::camera`): `enabled`, `days: [bool;
+7]` (Monday-first), and `start_minute`/`end_minute` (minutes since local
+midnight, inclusive at both ends; `end_minute < start_minute` means the
+window spans past midnight). `RecordingSchedule::is_active_at(weekday,
+minute_of_day)` is the pure function both the server and its tests use -
+when `enabled` is false it's always active, so an unconfigured schedule
+never changes existing behavior. `Supervisor::pipeline_config` now gates
+`recording_now` on `schedule_is_active_now(&camera.recording.schedule)`
+(server-local wall clock, via `chrono::Local::now()`) in addition to the
+existing trigger/motion checks - same whole-pipeline-rebuild mechanism
+motion-gated recording already used, not a live toggle (see "One shared
+pipeline per camera" above).
+
+A schedule boundary isn't caused by any request the server receives, so
+nothing would naturally notice one had been crossed - `omni-
+server::schedule` is a new background task (30s poll, mirroring
+`retention::run`'s and `auth::run_session_sweeper`'s pattern) that
+re-evaluates every camera with a schedule enabled and calls
+`Supervisor::restart_if_running` (then `ensure_running` if the window just
+opened) exactly when its active/inactive state actually changes - tracked
+per-camera in a `HashMap` so a no-op poll (the common case) touches
+nothing. Deliberately *not* wired into `keeps_pipeline_alive` (which still
+only checks `motion.enabled || recording.enabled`): a schedule-gated
+camera keeps its pipeline - and thus its USB device handle - open across
+the whole day rather than opening/closing the device at every window
+boundary, given this project's already-documented "device busy" flakiness
+around repeated open/close. Verified against a real running server: set a
+~3-minute window a few minutes out, watched real `.webm` segments appear
+exactly at the configured start and stop growing at the configured end,
+and confirmed the `schedule::run` log lines
+(`recording schedule boundary crossed, rebuilding pipeline`) fired at the
+right wall-clock times.
+
+**Timeline tab.** A new `TimelineView.svelte`, reachable from a "Timeline"
+nav entry alongside "Dashboard"/"Status": a list of cameras whose
+`CameraStatusInfo.status` is `online`/`streaming` (from the existing
+`GET /api/cameras/status`, polled every 10s); clicking one connects its
+live feed via the same `connectCameraView`/`SETTINGS_CHANGED_MESSAGE`
+auto-retry path `CameraTile`/`ExpandedCameraModal` already use (see
+"Post-v0.10 fixes" above), so a settings change mid-session reconnects
+instead of erroring out; and a vertical timeline of that camera's motion
+events (`GET /api/cameras/:id/events`, polled every 15s), newest first,
+each with a marker dot (red/pulsing while `ended_at` is still null, i.e.
+ongoing) and a formatted timestamp/duration. No new API routes - it reuses
+the same endpoints `RecordingsModal`/`StatusOverview` already call.
+Verified in a real headless-browser session against a running server: the
+camera list populates, selecting a camera renders real live video from
+the capture pipeline, and the empty states (no cameras online, no events
+yet) render correctly.
+
+## Known limitations / honest gaps in v0.10/v0.11
 
 - **Single admin account and single RTSP credential, not
   per-camera or per-user permissions** - every camera's RTSP mount point

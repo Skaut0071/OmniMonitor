@@ -10,6 +10,7 @@
   import ExpandedCameraModal from "./lib/ExpandedCameraModal.svelte";
   import IgnoredUsbDevicesModal from "./lib/IgnoredUsbDevicesModal.svelte";
   import StatusOverview from "./lib/StatusOverview.svelte";
+  import TimelineView from "./lib/TimelineView.svelte";
   import {
     listCameras,
     discoverCameras,
@@ -21,7 +22,7 @@
     type Camera,
   } from "./lib/api";
 
-  let view: "dashboard" | "status" = "dashboard";
+  let view: "dashboard" | "timeline" | "status" = "dashboard";
   let selectedGroup: string | null = null; // null = "All"
 
   let authChecked = false;
@@ -193,6 +194,15 @@
         >
         <!-- svelte-ignore a11y-invalid-attribute -->
         <a
+          class:active={view === "timeline"}
+          href="#/"
+          on:click|preventDefault={() => {
+            view = "timeline";
+            mobileNavOpen = false;
+          }}>Timeline</a
+        >
+        <!-- svelte-ignore a11y-invalid-attribute -->
+        <a
           class:active={view === "status"}
           href="#/"
           on:click|preventDefault={() => {
@@ -246,14 +256,26 @@
 
     <main>
       <header>
-        <h1>{view === "status" ? "Camera status" : "Cameras"}</h1>
-        <span class="count"
-          >{visibleCameras.length} camera{visibleCameras.length === 1 ? "" : "s"}</span
-        >
+        <h1>
+          {#if view === "status"}
+            Camera status
+          {:else if view === "timeline"}
+            Timeline
+          {:else}
+            Cameras
+          {/if}
+        </h1>
+        {#if view === "dashboard"}
+          <span class="count"
+            >{visibleCameras.length} camera{visibleCameras.length === 1 ? "" : "s"}</span
+          >
+        {/if}
       </header>
 
       {#if view === "status"}
         <StatusOverview />
+      {:else if view === "timeline"}
+        <TimelineView />
       {:else if loading}
         <p class="hint">Loading…</p>
       {:else if loadError}

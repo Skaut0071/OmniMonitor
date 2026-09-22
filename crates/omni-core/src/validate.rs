@@ -28,6 +28,8 @@ pub enum ValidationError {
     PasswordTooShort,
     #[error("group name must be 64 characters or fewer")]
     GroupNameTooLong,
+    #[error("schedule time must be between 00:00 and 23:59")]
+    InvalidScheduleMinute,
 }
 
 pub fn validate_camera_name(name: &str) -> Result<(), ValidationError> {
@@ -73,6 +75,17 @@ pub fn validate_framerate(fps: u32) -> Result<(), ValidationError> {
 pub fn validate_segment_seconds(secs: u32) -> Result<(), ValidationError> {
     if !(10..=3600).contains(&secs) {
         return Err(ValidationError::InvalidSegmentSeconds);
+    }
+    Ok(())
+}
+
+/// `start_minute`/`end_minute` are "minutes since local midnight" and
+/// only ever meaningful in 0-1439 - `RecordingSchedule::is_active_at`
+/// assumes that range (a value outside it isn't unsafe, just
+/// nonsensical: 1440 means "midnight", already expressible as 0).
+pub fn validate_schedule_minute(minute: u16) -> Result<(), ValidationError> {
+    if minute > 1439 {
+        return Err(ValidationError::InvalidScheduleMinute);
     }
     Ok(())
 }

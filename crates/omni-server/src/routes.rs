@@ -12,8 +12,8 @@ use tower_http::services::ServeFile;
 use uuid::Uuid;
 
 use omni_core::{
-    validate, Camera, CameraKind, MotionEvent, MotionSettings, RecordingSettings,
-    RecordingTrigger, Rotation, StreamCodec,
+    validate, Camera, CameraKind, MotionEvent, MotionSettings, RecordingSchedule,
+    RecordingSettings, RecordingTrigger, Rotation, StreamCodec,
 };
 
 use crate::auth;
@@ -426,6 +426,8 @@ struct UpdateRecordingRequest {
     segment_seconds: u32,
     retention_max_age_secs: Option<u64>,
     retention_max_size_bytes: Option<u64>,
+    #[serde(default)]
+    schedule: RecordingSchedule,
 }
 
 #[derive(Deserialize)]
@@ -507,12 +509,15 @@ async fn update_camera(
             rec.retention_max_size_bytes,
         )
         .map_err(bad_request)?;
+        validate::validate_schedule_minute(rec.schedule.start_minute).map_err(bad_request)?;
+        validate::validate_schedule_minute(rec.schedule.end_minute).map_err(bad_request)?;
         camera.recording = RecordingSettings {
             enabled: rec.enabled,
             trigger: rec.trigger,
             segment_seconds: rec.segment_seconds,
             retention_max_age_secs: rec.retention_max_age_secs,
             retention_max_size_bytes: rec.retention_max_size_bytes,
+            schedule: rec.schedule,
         };
     }
 

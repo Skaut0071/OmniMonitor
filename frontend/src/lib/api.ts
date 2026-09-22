@@ -1,11 +1,21 @@
 export type RecordingTrigger = "continuous" | "motion";
 
+export interface RecordingSchedule {
+  enabled: boolean;
+  // Monday first - days[0] is Monday, days[6] is Sunday, matching the
+  // backend's RecordingSchedule (see omni_core::camera).
+  days: boolean[];
+  start_minute: number; // minutes since local midnight, 0-1439
+  end_minute: number; // minutes since local midnight, 0-1439
+}
+
 export interface RecordingSettings {
   enabled: boolean;
   trigger: RecordingTrigger;
   segment_seconds: number;
   retention_max_age_secs: number | null;
   retention_max_size_bytes: number | null;
+  schedule: RecordingSchedule;
 }
 
 export interface MotionSettings {

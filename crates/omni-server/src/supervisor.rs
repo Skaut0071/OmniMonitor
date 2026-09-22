@@ -42,6 +42,7 @@ use omni_capture::{
     CaptureError, CaptureHandle, CaptureSession, CaptureSource, EncodedFrame, MotionConfig,
     PipelineConfig, RecordingSink,
 };
+use chrono::{Datelike, Timelike};
 use omni_core::{Camera, CameraKind, RecordingTrigger};
 use omni_db::Db;
 use tokio::sync::{broadcast, watch, RwLock};
@@ -162,6 +163,7 @@ impl Supervisor {
         let need_motion =
             camera.motion.enabled || camera.recording.trigger == RecordingTrigger::Motion;
         let recording_now = camera.recording.enabled
+            && schedule_is_active_now(&camera.recording.schedule)
             && (camera.recording.trigger == RecordingTrigger::Continuous || motion_active_now);
 
         let recording = recording_now.then(|| RecordingSink {
@@ -345,6 +347,17 @@ impl Supervisor {
             map.remove(&camera_id);
         }
     }
+}
+
+/// Evaluates a camera's recording schedule against the real current
+/// local time - the one place `chrono::Local::now()` (a real clock read,
+/// not available/meaningful in `omni-core`, which also compiles to wasm)
+/// meets `RecordingSchedule::is_active_at`'s pure day/minute predicate.
+pub(crate) fn schedule_is_active_now(schedule: &omni_core::RecordingSchedule) -> bool {
+    let now = chrono::Local::now();
+    let weekday_mon0 = now.weekday().num_days_from_monday() as u8;
+    let minute_of_day = (now.hour() * 60 + now.minute()) as u16;
+    schedule.is_active_at(weekday_mon0, minute_of_day)
 }
 
 /// Watches a camera's motion signal for as long as its owning pipeline
