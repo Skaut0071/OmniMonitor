@@ -1,6 +1,8 @@
 mod auth;
 mod discovery;
+mod led;
 mod motion;
+mod motion_retention;
 mod onvif_discovery;
 mod reachability;
 mod schedule;
@@ -62,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tokio::spawn(retention::run(db.clone(), PathBuf::from(&config.data_dir)));
+    tokio::spawn(motion_retention::run(db.clone(), PathBuf::from(&config.data_dir)));
     tokio::spawn(auth::run_session_sweeper(db.clone()));
     tokio::spawn(schedule::run(Arc::clone(&supervisor), db.clone()));
 

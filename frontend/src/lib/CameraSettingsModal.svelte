@@ -40,6 +40,8 @@
 
   let rotation: Rotation = camera.rotation;
   let overlayTimestamp = camera.overlay_timestamp;
+  let ledOnCommand = camera.led_control.on_command ?? "";
+  let ledOffCommand = camera.led_control.off_command ?? "";
   let group = camera.group ?? "";
 
   let ageEnabled = camera.recording.retention_max_age_secs != null;
@@ -142,6 +144,10 @@
         },
         rotation,
         overlay_timestamp: overlayTimestamp,
+        led_control: {
+          on_command: ledOnCommand.trim() || null,
+          off_command: ledOffCommand.trim() || null,
+        },
         group: trimmedGroup,
       });
       dispatch("updated");
@@ -291,6 +297,33 @@
       Burns the current date/time onto the video itself (bottom-right corner), so it's in the live
       view, recordings, and RTSP alike - takes effect after saving, disconnecting anyone currently
       watching this camera.
+    </p>
+
+    <label>
+      LED on command (optional)
+      <input
+        type="text"
+        bind:value={ledOnCommand}
+        placeholder="e.g. uvcdynctrl -d /dev/video0 -s LED 1"
+        disabled={!wasmReady}
+      />
+    </label>
+    <label>
+      LED off command (optional)
+      <input
+        type="text"
+        bind:value={ledOffCommand}
+        placeholder="e.g. uvcdynctrl -d /dev/video0 -s LED 0"
+        disabled={!wasmReady}
+      />
+    </label>
+    <p class="hint">
+      Shell commands run on the server to control this camera's LED ring (or any other indicator
+      light wired up to it) - useful mainly for a USB camera whose light doesn't otherwise reflect
+      whether it's actually in use. Only takes effect when this camera has no recording and no
+      motion detection enabled: it's then only actually capturing while someone is watching its
+      live view, so the "on" command runs when the first viewer connects and the "off" command
+      when the last one disconnects.
     </p>
 
     <label>

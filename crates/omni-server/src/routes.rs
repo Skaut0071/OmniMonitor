@@ -12,7 +12,7 @@ use tower_http::services::ServeFile;
 use uuid::Uuid;
 
 use omni_core::{
-    validate, Camera, CameraKind, MotionEvent, MotionSettings, RecordingSchedule,
+    validate, Camera, CameraKind, LedControl, MotionEvent, MotionSettings, RecordingSchedule,
     RecordingSettings, RecordingTrigger, Rotation, StreamCodec,
 };
 
@@ -402,6 +402,7 @@ async fn create_camera(
         motion: MotionSettings::default(),
         rotation: Rotation::default(),
         overlay_timestamp: false,
+        led_control: LedControl::default(),
         sort_order,
         group: None,
         status: None,
@@ -455,6 +456,10 @@ struct UpdateCameraRequest {
     motion: Option<UpdateMotionRequest>,
     rotation: Option<Rotation>,
     overlay_timestamp: Option<bool>,
+    /// Present (even if both inner fields are `None`) replaces the whole
+    /// `LedControl` - same "send the whole sub-object to change it"
+    /// convention as `recording`/`motion`, not a per-field PATCH.
+    led_control: Option<LedControl>,
     /// `Some("")` (or whitespace-only) clears the group; `None` leaves it
     /// unchanged - same convention as `motion.webhook_url`.
     group: Option<String>,
@@ -546,6 +551,19 @@ async fn update_camera(
 
     if let Some(overlay_timestamp) = req.overlay_timestamp {
         camera.overlay_timestamp = overlay_timestamp;
+    }
+
+    if let Some(led_control) = req.led_control {
+        camera.led_control = LedControl {
+            on_command: led_control
+                .on_command
+                .filter(|c| !c.trim().is_empty())
+                .map(|c| c.trim().to_string()),
+            off_command: led_control
+                .off_command
+                .filter(|c| !c.trim().is_empty())
+                .map(|c| c.trim().to_string()),
+        };
     }
 
     if let Some(group) = req.group {

@@ -80,6 +80,8 @@ struct CameraRow {
     motion_webhook_url: Option<String>,
     rotation: String,
     overlay_timestamp: bool,
+    led_on_command: Option<String>,
+    led_off_command: Option<String>,
     sort_order: i64,
     camera_group: Option<String>,
     schedule_enabled: bool,
@@ -156,6 +158,10 @@ impl TryFrom<CameraRow> for Camera {
             },
             rotation,
             overlay_timestamp: row.overlay_timestamp,
+            led_control: omni_core::LedControl {
+                on_command: row.led_on_command,
+                off_command: row.led_off_command,
+            },
             sort_order: row.sort_order,
             group: row.camera_group,
             status: None,
@@ -321,6 +327,9 @@ impl Db {
             "ALTER TABLE cameras ADD COLUMN schedule_end_minute INTEGER NOT NULL DEFAULT 1439",
             // v0.11.1: burned-in timestamp overlay.
             "ALTER TABLE cameras ADD COLUMN overlay_timestamp INTEGER NOT NULL DEFAULT 0",
+            // v0.12: LED ring control commands.
+            "ALTER TABLE cameras ADD COLUMN led_on_command TEXT",
+            "ALTER TABLE cameras ADD COLUMN led_off_command TEXT",
         ] {
             if let Err(err) = sqlx::query(stmt).execute(&self.pool).await {
                 let msg = err.to_string();
@@ -386,10 +395,11 @@ impl Db {
                 recording_enabled, recording_trigger, segment_seconds,
                 retention_max_age_secs, retention_max_size_bytes,
                 motion_enabled, motion_sensitivity, motion_webhook_url,
-                rotation, overlay_timestamp, sort_order, camera_group,
+                rotation, overlay_timestamp, led_on_command, led_off_command,
+                sort_order, camera_group,
                 schedule_enabled, schedule_days, schedule_start_minute, schedule_end_minute
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 kind = excluded.kind,
@@ -410,6 +420,8 @@ impl Db {
                 motion_webhook_url = excluded.motion_webhook_url,
                 rotation = excluded.rotation,
                 overlay_timestamp = excluded.overlay_timestamp,
+                led_on_command = excluded.led_on_command,
+                led_off_command = excluded.led_off_command,
                 sort_order = excluded.sort_order,
                 camera_group = excluded.camera_group,
                 schedule_enabled = excluded.schedule_enabled,
@@ -438,6 +450,8 @@ impl Db {
         .bind(&camera.motion.webhook_url)
         .bind(rotation)
         .bind(camera.overlay_timestamp)
+        .bind(&camera.led_control.on_command)
+        .bind(&camera.led_control.off_command)
         .bind(camera.sort_order)
         .bind(&camera.group)
         .bind(camera.recording.schedule.enabled)

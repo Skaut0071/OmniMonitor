@@ -365,15 +365,44 @@ The three items deferred from v0.9 as "bigger, own milestone":
       ~15s per notch instead of ~4s, since a full day's timeline at the
       old rate took thousands of notches to cross. Verified live.
 
+## v0.12 - motion recording pre/post-roll, LED ring control - done
+
+- [x] **Motion-triggered recording no longer disconnects live viewers**:
+      `RecordingTrigger::Motion` used to rebuild the entire capture
+      pipeline (including the live-view branch) on every single motion
+      start/stop, which visibly disconnected/reconnected anyone watching
+      that camera's live view every time something moved. The recording
+      branch now stays present in the pipeline for as long as recording
+      is enabled at all - exactly like `Continuous` - and
+      `omni-server::motion_retention` (a new background reaper, same
+      shape as `omni-server::retention`) deletes segments after the fact
+      that don't fall near a logged motion event, keeping only footage
+      from 30s before each motion event starts through 60s after it ends.
+      This also gives motion clips a pre-roll for free (previously a clip
+      only started once motion was already detected, with no lead-in).
+      Verified live against a running server with real motion events:
+      live view stays connected through a motion start/stop, and segments
+      outside the padded window get pruned while ones inside it survive.
+- [x] **Camera setting: LED ring on/off commands**: a per-camera
+      `led_control` (`on_command`/`off_command`, arbitrary shell
+      commands run server-side) for cameras with a software-controllable
+      LED ring or other indicator - mainly USB cameras. Only applies to a
+      camera with no recording and no motion detection enabled, since
+      that's the only case where its pipeline isn't already running for
+      its own reasons: the "on" command runs when the first live viewer
+      connects, "off" when the last one disconnects, mirroring
+      `Supervisor`'s existing ephemeral-pipeline lifecycle rather than
+      adding a separate one.
+
 ## Later / unscheduled
 
-- [ ] Apply camera settings changes (recording toggle, resolution, motion
-      transitions, ...) without disconnecting active viewers - needs
-      dynamic GStreamer `tee` pad add/remove instead of a full pipeline
-      restart. Would also fix the motion-events logging fidelity issue
-      for `RecordingTrigger::Motion` cameras noted in
-      `docs/ARCHITECTURE.md` (event tracking needs to live above the
-      per-pipeline-instance watcher, keyed by camera).
+- [ ] Apply camera settings changes (resolution, rotation, the recording
+      enabled/schedule toggle, ...) without disconnecting active viewers
+      - needs dynamic GStreamer `tee` pad add/remove instead of a full
+      pipeline restart. `RecordingTrigger::Motion`'s specific case of this
+      (a rebuild on every motion transition) is fixed as of v0.12 - see
+      above - but any other settings change still restarts the pipeline
+      and disconnects viewers.
 - [ ] Multi-user / per-camera permissions - still single-account only,
       and the RTSP credential (above) is a single shared secret too, not
       per-camera.

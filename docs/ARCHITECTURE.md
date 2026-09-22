@@ -249,11 +249,13 @@ independent consumers watch:
   `{"event":"motion_started",...}` JSON body on start (fire-and-forget,
   5s timeout, no retry queue - a slow/broken webhook endpoint just logs a
   warning, it doesn't block detection).
-- `omni-server::supervisor::spawn_motion_recording_watcher` - only for
-  `RecordingTrigger::Motion` cameras: rebuilds the pipeline (recording
-  branch present or absent) on every transition, per below.
+- `omni-server::motion_retention` - only for `RecordingTrigger::Motion`
+  cameras: doesn't watch the live signal at all, just reads the
+  `motion_events` table periodically to decide which already-recorded
+  segments to keep, per below and "Motion recording pre/post-roll,
+  without rebuilding the pipeline (v0.12)".
 
-### Why motion-gated recording rebuilds the whole pipeline
+### Why a GStreamer `valve` doesn't gate the recording branch live
 
 The first implementation used a GStreamer `valve` between the encoded tee
 and `splitmuxsink`, toggled live from the motion-detection callback -
@@ -289,42 +291,29 @@ actually recording end-to-end and checking the resulting file, not by
 checking for bus errors or successful state transitions, which all three
 broken versions reported cleanly.
 
-Given that, motion-gated recording now reuses the same full-pipeline
-rebuild already proven for settings changes: `Supervisor` watches the
-motion signal and calls `replace_pipeline` on every transition, which
-tears down the old pipeline and starts a fresh one with the recording
-branch present or absent to match. The fresh pipeline's *internal* motion
-state has to be seeded from the state it was rebuilt for
-(`MotionConfig::initial_active`) - without that, a freshly-rebuilt
-"recording" pipeline starts assuming "no motion yet", immediately
-re-detects the still-ongoing motion as a new transition, and asks for
-*another* rebuild, in a tight loop (caught by testing, not reasoned out -
-it was rebuilding several times a second).
+For v0.3 through v0.11.1, motion-gated recording reused the same
+full-pipeline rebuild already proven for settings changes: `Supervisor`
+watched the motion signal and called `replace_pipeline` on every
+transition, tearing down the old pipeline and starting a fresh one with
+the recording branch present or absent to match. That worked, but with
+two real costs accepted at the time: active viewers of a
+`RecordingTrigger::Motion` camera got disconnected on *every* motion
+transition (not just an explicit settings change - visible as a brief
+"connection lost"/black-frame flicker any time something moved), and the
+per-pipeline-instance event watcher meant a motion event still open at
+rebuild time got closed and immediately reopened as a spurious new event,
+making the `motion_events` log for such a camera noisier than reality.
 
-**Known trade-offs of this approach**, both accepted rather than solved
-for v0.3:
+v0.12 removes the rebuild-on-motion-transition entirely - see "Motion
+recording pre/post-roll, without rebuilding the pipeline (v0.12)" below -
+which incidentally fixes both trade-offs at once: the pipeline (and
+therefore the live-view branch and the event watcher) no longer restarts
+on a motion transition at all, only on an actual settings change.
 
-- Active viewers of a `RecordingTrigger::Motion` camera get disconnected
-  on *every* motion transition, not just on an explicit settings change -
-  it's the same restart machinery, so it has the same effect. The
-  frontend's retry path covers it, but it's a rougher experience than
-  gapless would be.
-- The per-pipeline-instance event watcher means a motion event that's
-  still open when a rebuild happens (which motion-triggered recording
-  causes on essentially every "motion starts" transition) gets closed by
-  the *old* pipeline's watcher tearing down and immediately reopened as a
-  *new* event by the incoming pipeline - so the `motion_events` log for a
-  `RecordingTrigger::Motion` camera can show a spurious near-zero-duration
-  event around each transition instead of one continuous one. The
-  recording itself (the file on disk) is unaffected; this is a logging
-  fidelity issue only, specific to combining motion-gated recording with
-  the events feature. Fixing it needs event-open/close tracking to live
-  above the per-pipeline-instance watcher (keyed by camera, surviving
-  rebuilds) - not done yet, see `docs/ROADMAP.md`.
-
-Applying motion transitions (and settings changes generally) without
-rebuilding the whole pipeline is the same "dynamic `tee` pad add/remove"
-future work mentioned above for plain settings changes.
+Applying settings changes generally (resolution, rotation, the recording
+enabled/schedule toggle, ...) without rebuilding the whole pipeline is
+still the same "dynamic `tee` pad add/remove" future work mentioned
+above - just no longer needed for motion transitions specifically.
 
 ## RTSP server
 
@@ -1056,6 +1045,87 @@ correctly at the ends of the recording list, and Next/Previous jump
 cleanly between segments' `src` (confirmed via the served recording
 URLs, not just UI state).
 
+## Motion recording pre/post-roll, without rebuilding the pipeline (v0.12)
+
+Reported symptom: a camera using `RecordingTrigger::Motion` stayed
+powered and capturing, but its live view in the dashboard would briefly
+show "connection lost" and go black, then reconnect, every time motion
+was detected (or ended). Root cause: exactly the trade-off called out in
+"Motion detection" above - every motion start/stop called
+`replace_pipeline`, which tears down and restarts the *entire* pipeline
+(live-view branch included) to add/remove the recording branch, and a
+torn-down pipeline sends every current viewer the
+`SETTINGS_CHANGED_MESSAGE` disconnect/auto-reconnect signal. Since motion
+was actively being detected, this could happen every few seconds.
+
+Fix: stop varying the recording branch's presence with the live motion
+state at all. `Supervisor::pipeline_config` now starts the recording
+branch whenever `camera.recording.enabled` (and the schedule, if any) say
+so, for `Motion` exactly like `Continuous` - the pipeline is fully stable
+across motion transitions, so live viewers are never disconnected by one.
+`spawn_motion_recording_watcher` (and the whole-pipeline-rebuild-on-
+motion-transition machinery) is gone.
+
+This obviously means a `Motion`-triggered camera is now *always*
+recording at the pipeline level, same as `Continuous` - so a second piece
+had to replace what the old design got for free: only keeping footage
+actually related to motion. `omni-server::motion_retention` is a new
+background reaper (`REAP_INTERVAL` 60s, same shape as
+`omni-server::retention`) that, for every `RecordingTrigger::Motion`
+camera, reads its recent `motion_events` and deletes any recorded segment
+that doesn't fall within `[event.started_at - 30s, event.ended_at +
+60s]` of *some* event (a still-open event's end is treated as "now", so
+its segments - including the currently-open one - are never mistakenly
+pruned). This also gives motion clips a real pre-roll for the first time:
+previously a clip only started once motion was already detected, with no
+lead-in; now the 30s immediately before are kept too.
+
+A segment's own time range is recovered from its filename
+(`{run_started_at}-{index:05}.webm`, exactly what
+`CaptureSession::start`'s `location` pattern writes) rather than
+filesystem timestamps, which can be wrong after e.g. a restore from
+backup: `start = run_started_at + index * segment_seconds`. Motion-
+triggered cameras use a fixed 20s segment length
+(`MOTION_SEGMENT_SECONDS`) instead of the camera's own configurable
+`segment_seconds` - that setting is tuned for "a few minutes per file" on
+continuous recording, which would make pruning far coarser than the
+30s/60s pre/post-roll margin actually needs. `retention.rs`'s existing
+age/size-based reaper still runs on top of this for any camera that also
+sets `retention_max_age_secs`/`retention_max_size_bytes`, motion-
+triggered or not - two independent, composable bounds.
+
+Verified against a running server with real motion events: live view
+stays connected (no disconnect/reconnect) through a motion start and end,
+and after a reap pass, segments overlapping the padded motion window
+survive on disk while segments with no nearby motion are deleted.
+
+## USB camera LED ring control (v0.12)
+
+Some USB cameras have a software-controllable LED ring or indicator
+light, separate from any hardware "capture in progress" light the sensor
+itself might have - and the actual control mechanism varies by hardware
+(a UVC extension unit, a serial-to-relay board, a GPIO pin, ...) with no
+common cross-vendor API. Rather than guess at (or hard-code support for)
+one specific mechanism no one could verify against real hardware here,
+`omni_core::LedControl` just holds two optional shell commands
+(`on_command`/`off_command`) that `omni-server::led::spawn_run` runs via
+`sh -c` with a 5s timeout, logging the outcome - the admin wires up
+whatever actually controls their camera's light (a `v4l2-ctl`/
+`uvcdynctrl` invocation, a script that toggles a GPIO pin, ...) and
+OmniMonitor just calls it at the right moments.
+
+Those moments piggyback on `Supervisor`'s existing ephemeral-pipeline
+lifecycle rather than adding a separate mechanism: `led_control` only
+does anything for a camera where `!keeps_pipeline_alive` (no recording,
+no motion detection enabled) - exactly the cameras whose pipeline already
+only exists while at least one viewer is watching. `on_command` runs in
+`acquire_viewer` right when such a camera's pipeline is freshly spawned
+(the first viewer); `off_command` runs in `ViewerGuard::drop`'s existing
+teardown branch (the last viewer leaving). A camera with recording or
+motion detection enabled is capturing for its own reasons regardless of
+viewers, so LED control deliberately doesn't apply there - there's no
+"someone started/stopped watching" transition to hook for it.
+
 ## Known limitations / honest gaps in v0.10/v0.11
 
 - **Single admin account and single RTSP credential, not
@@ -1065,17 +1135,12 @@ URLs, not just UI state).
   fine-grained, and Basic auth over RTSP isn't encrypted (see "HTTPS"
   above) - don't expose port 5544 to the open internet as-is.
 - **A settings change disconnects active viewers of that camera** (see
-  "One shared pipeline per camera" above) rather than applying live -
-  and for `RecordingTrigger::Motion` cameras, this now also happens on
-  every motion start/stop, not just an explicit settings change (see
-  "Motion detection" above).
-- **The motion-events log can show spurious near-zero-duration entries
-  around each transition for a `RecordingTrigger::Motion` camera**
-  specifically (event-open/close tracking doesn't yet survive the
-  pipeline rebuilds that trigger drives) - see "Motion detection" above.
-  Standalone motion detection (`motion.enabled` without motion-gated
-  recording) doesn't have this problem, since nothing rebuilds the
-  pipeline on a plain motion transition there.
+  "One shared pipeline per camera" above) rather than applying live. As
+  of v0.12 this no longer happens on every motion start/stop for
+  `RecordingTrigger::Motion` cameras (see "Motion recording pre/post-roll,
+  without rebuilding the pipeline (v0.12)" below) - only an actual
+  settings change (resolution, rotation, toggling recording/motion
+  itself, ...) still restarts the pipeline.
 - **Frame-drop-under-backpressure can transiently corrupt VP8 decode for
   live viewers.** The broadcast channel a lagging viewer falls behind on
   just skips ahead (`RecvError::Lagged`), which can show as a brief glitch

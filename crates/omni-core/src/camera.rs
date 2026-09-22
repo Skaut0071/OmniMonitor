@@ -125,13 +125,25 @@ impl RecordingSchedule {
 
 /// Continuous loop-recording settings for one camera. When `enabled`, the
 /// capture pipeline gains a second branch (GStreamer `splitmuxsink`) that
-/// writes fixed-length segment files to disk indefinitely, or only while
-/// motion is active (if `trigger` is `Motion`) and/or only within
-/// `schedule`'s window if that's enabled - both are whole-pipeline-rebuild
-/// decisions (see `docs/ARCHITECTURE.md`'s "Motion detection" section for
-/// why, including a GStreamer `valve` that was tried and abandoned), not
-/// a live-toggled element. A background reaper (`omni-server::retention`)
-/// deletes the oldest segments once `retention_max_age_secs` and/or
+/// writes fixed-length segment files to disk indefinitely (within
+/// `schedule`'s window, if that's enabled) - a whole-pipeline-rebuild
+/// decision for the schedule/enabled toggle itself (see
+/// `docs/ARCHITECTURE.md`'s "Motion detection" section for why, including
+/// a GStreamer `valve` that was tried and abandoned for *that*), not a
+/// live-toggled element.
+///
+/// `trigger: Motion` does *not* gate this branch on the current motion
+/// state, deliberately - the recording branch stays present and keeps
+/// writing segments the entire time recording is enabled, exactly like
+/// `Continuous`. Instead, `omni-server::motion_retention` prunes it after
+/// the fact: any segment that doesn't overlap a logged motion event
+/// (padded by a pre-roll/post-roll margin) gets deleted, while segments
+/// that do overlap are kept. This is what gives "only record while
+/// motion is detected" a pre-roll (footage from just *before* motion was
+/// detected, not just after) and avoids rebuilding the pipeline - and
+/// disconnecting live viewers - on every single motion start/stop.
+/// A background reaper (`omni-server::retention`) separately deletes the
+/// oldest remaining segments once `retention_max_age_secs` and/or
 /// `retention_max_size_bytes` is exceeded - "forever loop" recording
 /// bounded by age and/or total size, whichever limit is hit first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +198,30 @@ impl Default for MotionSettings {
     }
 }
 
+/// Shell commands run server-side to control a camera's LED ring (or any
+/// other GPIO/relay-controlled indicator light) - most relevant for USB
+/// cameras, but not restricted to them. Deliberately just "run this
+/// command" rather than a specific LED control API: the actual mechanism
+/// varies wildly by hardware (a UVC extension unit, a serial-to-relay
+/// board, a GPIO pin, ...) and OmniMonitor has no way to know which one a
+/// given camera uses, so it defers to whatever the admin has already set
+/// up on the host for their own hardware (`on_command`/`off_command` are
+/// run via `sh -c` by `omni-server::led`).
+///
+/// Only applies to cameras that don't otherwise need to keep capturing on
+/// their own - no continuous/motion recording and no motion detection
+/// enabled (see `Supervisor::keeps_pipeline_alive`). For those, the
+/// camera is only ever actually open while at least one person is
+/// watching its live view, so `on_command` runs when the first viewer
+/// connects and `off_command` when the last one disconnects - the LED
+/// tracks "someone is watching" instead of staying lit (or dark)
+/// regardless of use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct LedControl {
+    pub on_command: Option<String>,
+    pub off_command: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Camera {
     pub id: Uuid,
@@ -209,6 +245,8 @@ pub struct Camera {
     /// by the browser). Off by default since not everyone wants it.
     #[serde(default)]
     pub overlay_timestamp: bool,
+    #[serde(default)]
+    pub led_control: LedControl,
     /// Lower sorts first in the dashboard grid; ties broken by creation
     /// order. Only meaningful relative to other cameras' values - set via
     /// `PUT /api/cameras/reorder`, not directly.
@@ -243,6 +281,7 @@ impl Camera {
             motion: MotionSettings::default(),
             rotation: Rotation::default(),
             overlay_timestamp: false,
+            led_control: LedControl::default(),
             sort_order: 0,
             group: None,
             status: None,

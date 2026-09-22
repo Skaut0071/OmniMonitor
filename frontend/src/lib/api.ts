@@ -26,6 +26,11 @@ export interface MotionSettings {
 
 export type Rotation = "none" | "clockwise90" | "rotate180" | "counter_clockwise90";
 
+export interface LedControl {
+  on_command: string | null;
+  off_command: string | null;
+}
+
 export interface Camera {
   id: string;
   name: string;
@@ -41,6 +46,7 @@ export interface Camera {
   motion: MotionSettings;
   rotation: Rotation;
   overlay_timestamp: boolean;
+  led_control: LedControl;
   sort_order: number;
   group?: string;
   status?: "idle" | "streaming" | "error";
@@ -72,6 +78,7 @@ export interface UpdateCameraRequest {
   motion?: MotionSettings;
   rotation?: Rotation;
   overlay_timestamp?: boolean;
+  led_control?: LedControl;
   group?: string;
 }
 

@@ -23,14 +23,26 @@
 //!   work (see docs/ROADMAP.md) - it would need dynamic `tee` pad
 //!   add/remove instead of a full pipeline restart.
 //! - `RecordingTrigger::Motion` ("only record while motion is detected")
-//!   works the same way: every motion start/stop rebuilds the pipeline
-//!   with the recording branch added or removed (see `replace_pipeline`
-//!   and `spawn_motion_recording_watcher`), reusing the exact same
-//!   restart machinery as a settings change - so it carries the same
-//!   "active viewers get disconnected" caveat, on every motion
-//!   transition, not just on an explicit settings change. A GStreamer
-//!   `valve` toggled live was tried first and abandoned - see the long
-//!   comment on `omni_capture::RecordingSink` for why.
+//!   deliberately does *not* work this way: the recording branch stays
+//!   present in the pipeline for as long as recording is enabled at all,
+//!   regardless of the current motion state (see `pipeline_config`) - it
+//!   used to rebuild the whole pipeline on every motion start/stop, which
+//!   both disconnected every live viewer of that camera on every
+//!   transition (visible as a brief "connection lost"/black-frame flicker
+//!   any time something moved) and meant a recorded clip only started
+//!   *after* motion was already detected, with no lead-in. Instead,
+//!   `omni-server::motion_retention` prunes after the fact - see
+//!   `omni_core::RecordingSettings`'s docs.
+//!
+//! LED ring control (`omni_core::LedControl`, `omni-server::led`): for a
+//! camera that isn't kept alive on its own (no recording, no motion
+//! detection - see `keeps_pipeline_alive`), its pipeline only exists
+//! while someone is actually watching. `acquire_viewer` runs
+//! `led_control.on_command` exactly when such a camera's pipeline is
+//! freshly spawned (the first viewer), and `ViewerGuard::drop` runs
+//! `off_command` exactly when it's torn down (the last viewer leaving) -
+//! so the LED tracks "is anyone watching" for cameras that otherwise have
+//! no other reason to be capturing.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -48,9 +60,19 @@ use omni_db::Db;
 use tokio::sync::{broadcast, watch, RwLock};
 use uuid::Uuid;
 
-use crate::motion;
+use crate::{led, motion};
 
 const DEFAULT_BITRATE: u32 = 2_000_000;
+
+/// Segment length used for `RecordingTrigger::Motion` instead of the
+/// camera's own `segment_seconds` setting - that setting is meant for
+/// continuous "forever loop" recording, where a few minutes per file is
+/// sensible; motion-triggered recording is pruned to a window around each
+/// motion event (see `omni-server::motion_retention`) and a multi-minute
+/// segment would often span far more untouched footage than the
+/// pre-roll/post-roll margin actually needs, keeping much more than
+/// intended.
+pub(crate) const MOTION_SEGMENT_SECONDS: u32 = 20;
 
 struct ManagedCamera {
     session: CaptureSession,
@@ -68,6 +90,9 @@ struct ManagedCamera {
     /// regardless of viewers so it can notice the *next* transition,
     /// even while currently not actively recording.
     keep_alive: AtomicBool,
+    /// Cloned from `Camera::led_control` at spawn time - see the module
+    /// docs' "LED ring control" section.
+    led_control: omni_core::LedControl,
 }
 
 pub struct Supervisor {
@@ -90,6 +115,9 @@ impl Drop for ViewerGuard {
     fn drop(&mut self) {
         let prev = self.managed.viewers.fetch_sub(1, Ordering::SeqCst);
         if prev == 1 && !self.managed.keep_alive.load(Ordering::SeqCst) {
+            if let Some(cmd) = &self.managed.led_control.off_command {
+                led::spawn_run(self.camera_id, "off", cmd.clone());
+            }
             let supervisor = Arc::clone(&self.supervisor);
             let camera_id = self.camera_id;
             let managed = Arc::clone(&self.managed);
@@ -162,13 +190,23 @@ impl Supervisor {
         };
         let need_motion =
             camera.motion.enabled || camera.recording.trigger == RecordingTrigger::Motion;
-        let recording_now = camera.recording.enabled
-            && schedule_is_active_now(&camera.recording.schedule)
-            && (camera.recording.trigger == RecordingTrigger::Continuous || motion_active_now);
+        // Deliberately *not* gated on `motion_active_now` for
+        // `RecordingTrigger::Motion` - see the module docs' explanation of
+        // why that used to rebuild the pipeline (and disconnect live
+        // viewers) on every motion transition. The recording branch stays
+        // present the whole time recording is enabled; `motion_retention`
+        // prunes the resulting segments after the fact.
+        let recording_now =
+            camera.recording.enabled && schedule_is_active_now(&camera.recording.schedule);
+        let segment_seconds = if camera.recording.trigger == RecordingTrigger::Motion {
+            MOTION_SEGMENT_SECONDS
+        } else {
+            camera.recording.segment_seconds
+        };
 
         let recording = recording_now.then(|| RecordingSink {
             dir: self.recordings_dir(camera.id),
-            segment_seconds: camera.recording.segment_seconds,
+            segment_seconds,
         });
         let motion = need_motion.then_some(MotionConfig {
             sensitivity: camera.motion.sensitivity,
@@ -227,13 +265,6 @@ impl Supervisor {
         tracing::debug!(camera = %camera.id, motion_present = motion.is_some(), motion_active_now, "capture session started");
         if let Some(motion_rx) = &motion {
             motion::spawn_watcher(self.db.clone(), camera, motion_rx.clone());
-            if camera.recording.enabled && camera.recording.trigger == RecordingTrigger::Motion {
-                spawn_motion_recording_watcher(
-                    Arc::clone(self),
-                    camera.clone(),
-                    motion_rx.clone(),
-                );
-            }
         }
         let (superseded_tx, _) = watch::channel(false);
         Ok(Arc::new(ManagedCamera {
@@ -243,6 +274,7 @@ impl Supervisor {
             superseded: superseded_tx,
             viewers: AtomicUsize::new(0),
             keep_alive: AtomicBool::new(Self::keeps_pipeline_alive(camera)),
+            led_control: camera.led_control.clone(),
         }))
     }
 
@@ -259,6 +291,16 @@ impl Supervisor {
         } else {
             let managed = self.spawn_managed(camera, false)?;
             map.insert(camera.id, Arc::clone(&managed));
+            // This is the first viewer for a camera whose pipeline only
+            // exists while being watched (`spawn_managed` would already
+            // be running for a `keep_alive` camera by the time any viewer
+            // showed up, via `ensure_running` at boot/settings-change) -
+            // so this is exactly the "someone started watching" moment.
+            if !managed.keep_alive.load(Ordering::SeqCst) {
+                if let Some(cmd) = &managed.led_control.on_command {
+                    led::spawn_run(camera.id, "on", cmd.clone());
+                }
+            }
             managed
         };
         managed.viewers.fetch_add(1, Ordering::SeqCst);
@@ -359,37 +401,6 @@ pub(crate) fn schedule_is_active_now(schedule: &omni_core::RecordingSchedule) ->
     let weekday_mon0 = now.weekday().num_days_from_monday() as u8;
     let minute_of_day = (now.hour() * 60 + now.minute()) as u16;
     schedule.is_active_at(weekday_mon0, minute_of_day)
-}
-
-/// Watches a camera's motion signal for as long as its owning pipeline
-/// lives, and rebuilds that pipeline (adding or removing the recording
-/// branch) on every transition - see the module docs for why a full
-/// rebuild, not a live-toggled element.
-fn spawn_motion_recording_watcher(
-    supervisor: Arc<Supervisor>,
-    camera: Camera,
-    mut motion: watch::Receiver<bool>,
-) {
-    tokio::spawn(async move {
-        loop {
-            if motion.changed().await.is_err() {
-                return;
-            }
-            let active = *motion.borrow();
-            tracing::info!(camera = %camera.id, active, "motion transition: rebuilding pipeline for motion-triggered recording");
-            if let Err(err) = supervisor.replace_pipeline(&camera, active).await {
-                tracing::error!(camera = %camera.id, %err, "failed to rebuild pipeline for motion-triggered recording");
-                return;
-            }
-            // `replace_pipeline` just superseded the pipeline this very
-            // `motion` receiver belongs to, which will make the next
-            // `changed()` call return an error shortly (its sender is
-            // dropped once the old pipeline is torn down) - the *new*
-            // pipeline's own watcher (spawned by `spawn_managed` for it)
-            // takes over from here, so returning then is correct, not a
-            // missed transition.
-        }
-    });
 }
 
 /// Merges "the capture pipeline hit a bus error" and "this pipeline
