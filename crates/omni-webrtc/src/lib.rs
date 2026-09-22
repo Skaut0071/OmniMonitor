@@ -37,6 +37,102 @@ use webrtc::track::track_local::TrackLocal;
 /// directly - this crate is the only one that needs to.
 pub use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 
+/// Which STUN/TURN servers a peer connection offers ICE, read once at
+/// startup and reused for every viewer rather than re-reading env vars
+/// per connection.
+///
+/// STUN alone (the only thing configured before this) only helps two
+/// peers discover their own public address for a *direct* UDP path - it
+/// does nothing when the actual network in between (a restrictive VPN,
+/// some corporate firewalls, symmetric NAT) blocks or mangles UDP
+/// entirely, which shows up as a connection stuck at "connecting" or
+/// stuck "live" with no picture (the data path negotiated, but no media
+/// packets are actually getting through). TURN is the standard fix: a
+/// relay server the client falls back to when a direct path isn't
+/// possible, which - depending on how the TURN server itself is
+/// configured - can also be reached over TCP/TLS rather than UDP,
+/// getting through networks that block UDP outright. There's no TURN
+/// server bundled or auto-configured here: running one (e.g. `coturn`)
+/// is real infrastructure with its own bandwidth cost (all relayed media
+/// flows through it), left to whoever's deploying this to set up and
+/// point at, not something to spin up unasked.
+#[derive(Debug, Clone)]
+pub struct IceServersConfig {
+    stun_url: String,
+    turn: Option<TurnConfig>,
+}
+
+#[derive(Debug, Clone)]
+struct TurnConfig {
+    url: String,
+    username: String,
+    password: String,
+}
+
+impl IceServersConfig {
+    /// `OMNI_STUN_URL` overrides the default public Google STUN server.
+    /// `OMNI_TURN_URL` (plus `OMNI_TURN_USERNAME`/`OMNI_TURN_PASSWORD`)
+    /// adds a TURN server as a fallback ICE candidate - all three must be
+    /// set together, or TURN is left out entirely (a TURN server with no
+    /// credentials configured is a relay open to whoever finds it).
+    pub fn from_env() -> Self {
+        Self::from_values(
+            std::env::var("OMNI_STUN_URL").ok(),
+            std::env::var("OMNI_TURN_URL").ok(),
+            std::env::var("OMNI_TURN_USERNAME").ok(),
+            std::env::var("OMNI_TURN_PASSWORD").ok(),
+        )
+    }
+
+    /// Pure logic behind `from_env`, factored out so it's testable
+    /// without mutating real process environment variables (which,
+    /// shared across a whole test binary run concurrently, is a classic
+    /// source of flaky tests).
+    fn from_values(
+        stun_url: Option<String>,
+        turn_url: Option<String>,
+        turn_username: Option<String>,
+        turn_password: Option<String>,
+    ) -> Self {
+        let stun_url = stun_url
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "stun:stun.l.google.com:19302".to_string());
+
+        let turn_url = turn_url.filter(|v| !v.is_empty());
+        let turn_username = turn_username.filter(|v| !v.is_empty());
+        let turn_password = turn_password.filter(|v| !v.is_empty());
+        let turn = match (turn_url, turn_username, turn_password) {
+            (Some(url), Some(username), Some(password)) => Some(TurnConfig { url, username, password }),
+            (None, None, None) => None,
+            _ => {
+                tracing::warn!(
+                    "OMNI_TURN_URL/OMNI_TURN_USERNAME/OMNI_TURN_PASSWORD must all be set together - \
+                     ignoring incomplete TURN configuration"
+                );
+                None
+            }
+        };
+
+        Self { stun_url, turn }
+    }
+
+    fn to_ice_servers(&self) -> Vec<RTCIceServer> {
+        let mut servers = vec![RTCIceServer {
+            urls: vec![self.stun_url.clone()],
+            ..Default::default()
+        }];
+        if let Some(turn) = &self.turn {
+            servers.push(RTCIceServer {
+                urls: vec![turn.url.clone()],
+                username: turn.username.clone(),
+                credential: turn.password.clone(),
+                ..Default::default()
+            });
+        }
+        servers
+    }
+}
+
 /// A live browser<->camera WebRTC session for one viewer. Dropping this
 /// tears down the peer connection and stops the frame-forwarding task.
 /// The underlying capture pipeline is *not* owned here - see
@@ -61,6 +157,7 @@ impl StreamSession {
         offer_sdp: &str,
         frames: broadcast::Receiver<EncodedFrame>,
         mut error: watch::Receiver<Option<String>>,
+        ice_servers: &IceServersConfig,
     ) -> Result<(Self, String, mpsc::UnboundedReceiver<RTCIceCandidateInit>)> {
         let mut media_engine = MediaEngine::default();
         media_engine
@@ -77,10 +174,7 @@ impl StreamSession {
             .build();
 
         let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-                ..Default::default()
-            }],
+            ice_servers: ice_servers.to_ice_servers(),
             ..Default::default()
         };
 
@@ -241,5 +335,59 @@ async fn forward_frames(
             tracing::debug!(%err, "stopping frame forwarding: track write failed");
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_to_google_stun_with_no_turn() {
+        let cfg = IceServersConfig::from_values(None, None, None, None);
+        let servers = cfg.to_ice_servers();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].urls, vec!["stun:stun.l.google.com:19302"]);
+    }
+
+    #[test]
+    fn empty_stun_url_falls_back_to_default() {
+        let cfg = IceServersConfig::from_values(Some(String::new()), None, None, None);
+        assert_eq!(cfg.to_ice_servers()[0].urls, vec!["stun:stun.l.google.com:19302"]);
+    }
+
+    #[test]
+    fn custom_stun_url_is_used() {
+        let cfg = IceServersConfig::from_values(Some("stun:my-stun:3478".to_string()), None, None, None);
+        assert_eq!(cfg.to_ice_servers()[0].urls, vec!["stun:my-stun:3478"]);
+    }
+
+    #[test]
+    fn complete_turn_config_is_added_as_second_server() {
+        let cfg = IceServersConfig::from_values(
+            None,
+            Some("turn:my-turn:3478".to_string()),
+            Some("user".to_string()),
+            Some("pass".to_string()),
+        );
+        let servers = cfg.to_ice_servers();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[1].urls, vec!["turn:my-turn:3478"]);
+        assert_eq!(servers[1].username, "user");
+        assert_eq!(servers[1].credential, "pass");
+    }
+
+    #[test]
+    fn incomplete_turn_config_is_dropped_not_partially_applied() {
+        // Missing password - this must never send a TURN server with an
+        // empty credential to the browser, which would just be a relay
+        // with an empty password rather than "TURN not configured".
+        let cfg = IceServersConfig::from_values(
+            None,
+            Some("turn:my-turn:3478".to_string()),
+            Some("user".to_string()),
+            None,
+        );
+        assert_eq!(cfg.to_ice_servers().len(), 1);
     }
 }

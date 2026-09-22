@@ -7,7 +7,9 @@ for a Ubiquiti-Protect-style dashboard UI/UX with **USB webcams treated as
 first-class cameras** - plug in a UVC camera over USB and it gets the same
 live-preview and recording pipeline a network/RTSP camera would.
 
-Status: **Alpha (v0.10.1)**. Mobile-friendly dashboard. Live preview over WebRTC (trickle ICE, with
+Status: **Alpha (v0.10.2)**. Mobile-friendly dashboard, configurable
+STUN/TURN for connections over restrictive networks/VPNs. Live preview
+over WebRTC (trickle ICE, with
 click-to-expand and live-view zoom), drag-and-drop dashboard reordering,
 camera groups/tabs, a no-video status overview (online/offline/USB vs
 network), camera rotation, continuous or motion-triggered segmented
@@ -239,6 +241,28 @@ cd frontend && npm install && npm run dev
 
 Every endpoint above `/api/auth/login` requires a valid session cookie
 (set by logging in) - see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#authentication).
+
+## Live view stuck at "connecting" over a VPN or restrictive network?
+
+Live view's video is sent over UDP (WebRTC), which VPNs and some
+firewalls commonly block even when everything else (the web UI, RTSP)
+works fine over TCP - that mismatch is the usual cause of a tile stuck
+at "connecting" or showing "live" with no picture. If that's happening,
+set up a TURN server (e.g. [`coturn`](https://github.com/coturn/coturn))
+and point OmniMonitor at it:
+
+```
+Environment=OMNI_TURN_URL=turn:your-turn-server:3478
+Environment=OMNI_TURN_USERNAME=changeme
+Environment=OMNI_TURN_PASSWORD=changeme
+```
+
+in `/etc/systemd/system/omnimonitor.service` (all three required
+together), then `sudo systemctl daemon-reload && sudo systemctl restart
+omnimonitor`. `OMNI_STUN_URL` is also configurable if you need a
+different STUN server, though that alone won't help on a UDP-blocking
+network - only TURN does. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for why.
 
 ## HTTPS
 

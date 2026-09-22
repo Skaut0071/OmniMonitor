@@ -134,7 +134,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, camera_id: U
     };
 
     let (session, answer_sdp, mut local_candidates) =
-        match StreamSession::start(&offer_sdp, frames, ended.clone()).await {
+        match StreamSession::start(&offer_sdp, frames, ended.clone(), &state.ice_servers).await {
             Ok(triple) => triple,
             Err(err) => {
                 let _ = send_error(

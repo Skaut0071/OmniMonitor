@@ -915,6 +915,49 @@ regression covered above):
   overflowed off-screen with no visible scrollbar despite technically
   being scrollable.
 
+## Configurable STUN/TURN (v0.10.2)
+
+Live view stuck at "connecting," or "live" with no picture, over a VPN
+or restrictive network was a real, explainable gap, not just "WebRTC is
+like that": WebRTC media (RTP/SRTP) is sent over UDP - the reason it's
+normally low-latency - but that's exactly what VPNs and some corporate/
+consumer firewalls most commonly block or mangle, while the initial
+signaling WebSocket (TCP) usually still gets through fine. That mismatch
+produces exactly the reported symptom: signaling and the peer connection
+negotiate successfully, but no actual media packets arrive.
+
+Until now, the only ICE server configured was a single hardcoded public
+STUN server (`stun:stun.l.google.com:19302`), and no TURN server at all.
+STUN only helps two peers discover their own public address for a
+*direct* UDP path - it does nothing when the network in between blocks
+UDP outright or does symmetric NAT. TURN is the standard fix: a relay
+server the client falls back to when a direct path isn't possible,
+which - depending on how the TURN server itself is set up - can also be
+reached over TCP/TLS, getting through networks that block UDP entirely.
+
+`omni_webrtc::IceServersConfig` (`OMNI_STUN_URL`, `OMNI_TURN_URL`/
+`OMNI_TURN_USERNAME`/`OMNI_TURN_PASSWORD`, read once at startup into
+`AppState` rather than re-read per connection) makes both configurable.
+All three TURN variables are required together - a TURN server added
+with no credentials configured client-side would just look unconfigured
+rather than erroring, so an incomplete set is explicitly logged and
+dropped rather than silently sending a broken (e.g. empty-password)
+entry to the browser. No TURN server is bundled or auto-configured:
+running one (`coturn` is the standard choice) is real infrastructure
+with an ongoing bandwidth cost, since all relayed video flows through
+it - left to whoever deploys this to set up and point at.
+
+The env-parsing/server-list-building logic is unit tested
+(`omni_webrtc::tests`) against a pure function (`from_values`) rather
+than mutating real process environment variables, which avoids the
+classic flakiness of env-var-mutation tests running concurrently in one
+test binary. Not yet tested against a real TURN server/restrictive
+network in this session - the wiring is verified (live startup log
+shows the "must all be set together" warning firing correctly for an
+intentionally incomplete config), but the actual "does this fix a real
+VPN-blocked connection" claim is unverified pending the person deploying
+this actually having a TURN server to point at.
+
 ## Known limitations / honest gaps in v0.10
 
 - **Single admin account and single RTSP credential, not
