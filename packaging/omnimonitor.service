@@ -20,24 +20,6 @@ Environment=OMNI_FRONTEND_DIST=/opt/omnimonitor/frontend/dist
 # Environment=OMNI_ADMIN_PASSWORD=changeme
 # Environment=OMNI_RTSP_PASSWORD=changeme
 
-# Live view stuck at "connecting" or "live" with no picture over a VPN
-# or restrictive network? The video itself is sent over UDP (WebRTC/RTP),
-# which VPNs and some firewalls commonly block or mangle even when the
-# initial signaling connection gets through fine. A TURN server is the
-# standard fix - it relays media through a server your network *can*
-# reach (which can itself be configured to accept TCP/TLS, not just
-# UDP). This project doesn't run one for you (that's real infrastructure
-# to host, with its own bandwidth cost since all relayed video flows
-# through it) - point at your own (e.g. coturn) or a third-party one.
-# All three TURN variables must be set together, or TURN is skipped
-# entirely. OMNI_STUN_URL alone (no TURN) just swaps which STUN server
-# is used for direct-connection address discovery - it won't help with
-# a UDP-blocking network on its own.
-# Environment=OMNI_STUN_URL=stun:stun.l.google.com:19302
-# Environment=OMNI_TURN_URL=turn:your-turn-server:3478
-# Environment=OMNI_TURN_USERNAME=changeme
-# Environment=OMNI_TURN_PASSWORD=changeme
-
 WorkingDirectory=/var/lib/omnimonitor
 ExecStart=/opt/omnimonitor/bin/omni-server
 Restart=on-failure

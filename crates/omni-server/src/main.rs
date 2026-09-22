@@ -69,7 +69,6 @@ async fn main() -> anyhow::Result<()> {
     )));
 
     let rtsp_server = RtspServer::start(config.rtsp_port, &rtsp_username, &rtsp_password);
-    let ice_servers = omni_webrtc::IceServersConfig::from_env();
 
     let state = Arc::new(AppState {
         db,
@@ -77,7 +76,6 @@ async fn main() -> anyhow::Result<()> {
         supervisor,
         rtsp_server,
         login_rate_limiter,
-        ice_servers,
     });
 
     // Every camera gets an RTSP mount point at /<camera-id>, regardless

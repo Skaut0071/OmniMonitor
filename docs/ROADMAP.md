@@ -309,23 +309,6 @@ The three items deferred from v0.9 as "bigger, own milestone":
       deliberately unreachable RTSP address, TEST-NET `192.0.2.55`
       (offline, correctly took ~2s to time out).
 
-## v0.10.1 / v0.10.2 - real-usage fixes - done
-
-- [x] Auto-retry after a settings change instead of a manual "Retry"
-      click (`SETTINGS_CHANGED_MESSAGE` in `webrtc-view.ts`).
-- [x] Fixed a 90°/270° rotation stretching the video - the pipeline now
-      swaps the target width/height for those rotations instead of
-      squashing a portrait-shaped image into a landscape box. Verified
-      via `ffprobe` against a real camera.
-- [x] Mobile-friendly dashboard (off-canvas drawer, responsive grid/
-      modals) - verified visually with a headless Chromium screenshot at
-      a 375×667 viewport, not just by reading the CSS.
-- [x] Configurable STUN/TURN (`OMNI_STUN_URL`/`OMNI_TURN_URL`/
-      `OMNI_TURN_USERNAME`/`OMNI_TURN_PASSWORD`) - addresses live view
-      hanging at "connecting" over a VPN or UDP-blocking network. No
-      TURN server bundled; see `docs/ARCHITECTURE.md` for why and
-      `README.md` for how to point at your own.
-
 ## Later / unscheduled
 
 - [ ] Apply camera settings changes (recording toggle, resolution, motion
